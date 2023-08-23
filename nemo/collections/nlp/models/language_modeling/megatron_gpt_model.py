@@ -55,6 +55,7 @@ from nemo.collections.nlp.modules.common.transformer.text_generation import (
     TextGeneration,
 )
 from nemo.collections.nlp.parts.utils_funcs import activation_to_func, get_last_rank
+from nemo.collections.nlp.models.language_modeling.gpt.config import GPTConfig
 from nemo.core.classes import Exportable
 from nemo.core.classes.common import PretrainedModelInfo
 from nemo.core.neural_types import ChannelType, NeuralType
@@ -197,7 +198,7 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
     Megatron GPT pretraining
     """
 
-    def __init__(self, cfg: DictConfig, trainer: Trainer):
+    def __init__(self, cfg: GPTConfig, trainer: Trainer):
         if not HAVE_APEX:
             raise ImportError(
                 "Apex was not found. Please see the NeMo README for installation instructions: https://github.com/NVIDIA/NeMo#megatron-gpt."
