@@ -1,0 +1,3 @@
+FROM nemo-dev:latest
+
+ENV PYTHONPATH "${PYTHONPATH}:/workspace/NeMo/nemo"

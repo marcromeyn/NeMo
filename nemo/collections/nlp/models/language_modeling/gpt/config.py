@@ -1,25 +1,20 @@
-from typing import Any, Optional, Union, List, Dict, Tuple
-from dataclasses import dataclass, is_dataclass, field
+from typing import List, Optional
+from dataclasses import dataclass
 
 from omegaconf import OmegaConf
 from nemo.collections.nlp.models.language_modeling.config.base import (
     ActivationCheckpointingConfig,
     AMPConfig,
+    BaseConfig,
     FusionConfig,
     NSysProfilingConfig,
     OptimizationConfig,
     TransformerEngineConfig
 )
-from nemo.collections.nlp.parts.nlp_overrides import (
-    GradScaler,
-    MegatronHalfPrecisionPlugin,
-    NLPDDPStrategy,
-    PipelineMixedPrecisionPlugin,
-)
 
 
 @dataclass
-class GPTPretrainDatasetConfig:
+class GPTPretrainDatasetConfig(BaseConfig):
     """
     Configuration for the GPT pretraining dataset.
 
@@ -60,9 +55,36 @@ class GPTPretrainDatasetConfig:
     shuffle_documents: bool = True
     exchange_indices_distributed: bool = False
 
+    
+@dataclass
+class ParallelismConfig(BaseConfig):
+    """Configuration for parallelism including micro and global batch sizes, and model parallelism.
+
+    Attributes:
+        micro_batch_size (int): Micro batch size, limited by GPU memory.
+        global_batch_size (int): Global batch size, uses more micro batches to reach this size.
+        rampup_batch_size (Optional[List[int]]): Specifies the batch size ramp-up. Should be a list of 3 values: [<start_batch_size>, <batch_size_increment>, <rampup_samples>]. Defaults to None.
+        tensor_model_parallel_size (int): Intra-layer model parallelism. Defaults to 1.
+        pipeline_model_parallel_size (int): Inter-layer model parallelism. Defaults to 1.
+        virtual_pipeline_model_parallel_size (Optional[int]): Interleaved pipeline. Defaults to None.
+        sequence_parallel (bool): 
+            Makes tensor parallelism more memory efficient for LLMs (20B+) by parallelizing layer 
+            norms and dropout sequentially
+            See Reducing Activation Recomputation in Large Transformer Models: 
+            https://arxiv.org/abs/2205.05198 for more details.
+    """
+
+    micro_batch_size: int = 4
+    global_batch_size: int = 8
+    rampup_batch_size: Optional[List[int]] = None
+    tensor_model_parallel_size: int = 1
+    pipeline_model_parallel_size: int = 1
+    virtual_pipeline_model_parallel_size: Optional[int] = None
+    sequence_parallel: bool = False
+
 
 @dataclass
-class GPTTokenizerConfig:
+class GPTTokenizerConfig(BaseConfig):
     """Configuration for the Tokenizer used in the GPT.
 
     Attributes:
@@ -113,25 +135,27 @@ class GPTMiscConfig:
     apex_transformer_log_level: int = 30
     gradient_as_bucket_view: bool = True
     sync_batch_comm: bool = False
+    gc_interval: int = 0
 
 
 
-_V1_FLATTENED_CONFIGS = [
-    AMPConfig, 
-    ActivationCheckpointingConfig, 
-    FusionConfig, 
-    GPTMiscConfig, 
-    TransformerEngineConfig
-]
+_V1_FLATTENED_CONFIGS = {
+    "amp": AMPConfig, 
+    "activation_checkpoint": ActivationCheckpointingConfig, 
+    "fusion": FusionConfig, 
+    "misc": GPTMiscConfig, 
+    "te": TransformerEngineConfig,
+    "parallel": ParallelismConfig
+}
 _V1_ATTRIBUTES = {
-    key: class_name.__name__.lower() 
-    for class_name in _V1_FLATTENED_CONFIGS 
+    key: name
+    for name, class_name in _V1_FLATTENED_CONFIGS.items()
     for key in class_name.__dataclass_fields__.keys()
 }
 
 
 @dataclass
-class GPTConfig:
+class GPTConfig(BaseConfig):
     """Configuration for the GPT model.
 
     Attributes:
@@ -197,10 +221,11 @@ class GPTConfig:
     
     # For V1 these configs can also be accessed in a "flat" way
     amp: AMPConfig = AMPConfig()
-    activation: ActivationCheckpointingConfig = ActivationCheckpointingConfig()
+    activation_checkpoint: ActivationCheckpointingConfig = ActivationCheckpointingConfig()
     fusion: FusionConfig = FusionConfig()
     misc: GPTMiscConfig = GPTMiscConfig()
     te: TransformerEngineConfig = TransformerEngineConfig()
+    parallel: ParallelismConfig = ParallelismConfig()
     
     encoder_seq_length: int = 512
     num_layers: int = 12
@@ -234,6 +259,11 @@ class GPTConfig:
     overlap_p2p_comm: bool = False
     batch_p2p_comm: bool = True
     
+    mcore_gpt: bool = False
+    seq_len_interpolation_factor: Optional[float] = None
+    num_query_groups: Optional[int] = None
+    use_flash_attention: bool = False
+    
     @classmethod
     def from_flattened_cfg(cls, cfg: OmegaConf) -> "GPTConfig":
         """
@@ -246,23 +276,29 @@ class GPTConfig:
             GPTConfig: The constructed dataclass.
         """
         # Create a copy of the cfg to avoid modifying the original
-        cfg_copy = OmegaConf.copy(cfg)
+        cfg_dict = OmegaConf.to_container(cfg)
 
         # Handle special v1 flattened attributes
         v1_config_objects = {
-            class_name.__name__.lower(): class_name() for class_name in _V1_FLATTENED_CONFIGS
+            name: class_name() for name, class_name in _V1_FLATTENED_CONFIGS.items()
         }
-        for key, value in cfg_copy.items():
+        _to_remove = []
+        for key, value in cfg_dict.items():
             attr_class = _V1_ATTRIBUTES.get(key)
             if attr_class:
                 v1_config_objects[attr_class].__setattr__(key, value)
-                del cfg_copy[key]
+                _to_remove.append(key)
+                
+        for key in _to_remove:
+            del cfg_dict[key]
 
         # Extract other attributes, providing defaults if not found
-        data = cfg_copy.pop("data", GPTPretrainDatasetConfig())
-        tokenizer = cfg_copy.pop("tokenizer", GPTTokenizerConfig())
-        nsys_profile = cfg_copy.pop("nsys_profile", NSysProfilingConfig())
-        optim = cfg_copy.pop("optim", OptimizationConfig())
+        data = GPTPretrainDatasetConfig(**cfg_dict.pop("data", {}))
+        tokenizer = GPTTokenizerConfig(**cfg_dict.pop("tokenizer", {}))
+        nsys_profile = NSysProfilingConfig(**cfg_dict.pop("nsys_profile", {}))
+        optim = OptimizationConfig(**cfg_dict.pop("optim", {}))
+        
+        del cfg_dict["max_position_embeddings"]
 
         # Un-pack the remaining attributes to instantiate the GPTConfig class
         return cls(
@@ -270,16 +306,12 @@ class GPTConfig:
             tokenizer=tokenizer, 
             nsys_profile=nsys_profile, 
             optim=optim,
-            **v1_config_objects, 
-            **cfg_copy
+            **v1_config_objects,
+            **cfg_dict
         )
         
     def __post_init__(self):
         self.data.seq_length = str(self.encoder_seq_length)
-        
-    def get(self, attribute_name: str, default=None):
-        """Retrieves the value of the specified attribute or returns the default value if not found."""
-        return getattr(self, attribute_name, default)
     
     @property
     def max_position_embeddings(self) -> int:
@@ -300,5 +332,9 @@ class GPTConfig:
             attr_name = _V1_ATTRIBUTES[name]
             return getattr(getattr(self, attr_name), name)
 
-        # If attribute not found, call the base class's __getattr__ method
-        return super().__getattr__(name)
+        # Check if the attribute is part of the dataclass attributes
+        if name in self.__dict__:
+            return getattr(self, name)
+
+        # If attribute not found, raise an AttributeError
+        raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")

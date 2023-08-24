@@ -2,8 +2,24 @@ from typing import Any, Optional, Union, List, Dict, Tuple
 from dataclasses import dataclass, is_dataclass, field
 
 
+class BaseConfig:
+    # Mimic OmegaConf API for backwards compatibility
+    def get(self, attribute_name: str, default=None):
+        """Retrieves the value of the specified attribute or returns the default value if not found."""
+        return getattr(self, attribute_name, default)
+    
+    def __contains__(self, key) -> bool:
+        return key in self.__dict__.values()
+    
+    def _set_flag(self, name: str, value: bool):
+        pass
+    
+    def _get_node_flag(self, name: str):
+        return True
+
+
 @dataclass
-class AMPConfig:
+class AMPConfig(BaseConfig):
     """Configuration for AMP (Automatic Mixed Precision) settings.
 
     Attributes:
@@ -36,7 +52,7 @@ class AMPConfig:
 
 
 @dataclass
-class FusionConfig:
+class FusionConfig(BaseConfig):
     """Configuration for various fusion optimizations.
 
     Attributes:
@@ -69,7 +85,7 @@ class FusionConfig:
 
 
 @dataclass
-class ActivationCheckpointingConfig:
+class ActivationCheckpointingConfig(BaseConfig):
     """Configuration for activation checkpointing strategies.
 
     Attributes:
@@ -110,7 +126,7 @@ class ActivationCheckpointingConfig:
 
 
 @dataclass
-class TransformerEngineConfig:
+class TransformerEngineConfig(BaseConfig):
     """Configuration for the Transformer Engine.
 
     Attributes:
@@ -144,7 +160,7 @@ class TransformerEngineConfig:
 
 
 @dataclass
-class NSysProfilingConfig:
+class NSysProfilingConfig(BaseConfig):
     """Configuration for NSys profiling.
 
     Attributes:
@@ -164,7 +180,7 @@ class NSysProfilingConfig:
 
     
 @dataclass
-class SchedulerConfig:
+class SchedulerConfig(BaseConfig):
     """
     Configuration for the learning rate scheduler.
 
@@ -182,7 +198,7 @@ class SchedulerConfig:
 
 
 @dataclass
-class OptimizationConfig:
+class OptimizationConfig(BaseConfig):
     """
     Configuration for the optimizer used in the training process.
 

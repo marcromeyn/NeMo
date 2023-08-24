@@ -21,6 +21,7 @@ from nemo.collections.nlp.parts.megatron_trainer_builder import MegatronTrainerB
 from nemo.core.config import hydra_runner
 from nemo.utils import logging
 from nemo.utils.exp_manager import exp_manager
+from nemo.collections.nlp.models.language_modeling.gpt import gpt_pre_training
 
 mp.set_start_method("spawn", force=True)
 
@@ -29,6 +30,8 @@ mp.set_start_method("spawn", force=True)
 def main(cfg) -> None:
     logging.info("\n\n************** Experiment configuration ***********")
     logging.info(f'\n{OmegaConf.to_yaml(cfg)}')
+    
+    gpt_pre_training(cfg.model, cfg.trainer, cfg.exp_manager)
 
     trainer = MegatronTrainerBuilder(cfg).create_trainer()
     exp_manager(trainer, cfg.exp_manager)
