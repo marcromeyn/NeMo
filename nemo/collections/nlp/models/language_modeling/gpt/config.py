@@ -225,6 +225,13 @@ class GPTConfig(BaseConfig):
     restore_from_path: Optional[str] = None
     save_nemo_on_validation_end: bool = False
     answer_only_loss: bool = False
+    fp32_grad_accum: bool = False
+    contiguous_grad_bucket: bool = False
+    async_grad_allreduce: bool = False
+    merges_file: Optional[str] = None
+    vocab_file: Optional[str] = None
+    target: Optional[str] = None
+    precision: Optional[str] = None
     
     @classmethod
     def from_flattened_cfg(cls, cfg: OmegaConf) -> "GPTConfig":
@@ -252,8 +259,7 @@ class GPTConfig(BaseConfig):
                 _to_remove.append(key)
                 
         for key in _to_remove:
-            if key in cfg_dict:
-                del cfg_dict[key]
+            cfg_dict.pop(key, None)
 
         # Extract other attributes, providing defaults if not found
         # data = GPTPretrainDatasetConfig(**cfg_dict.pop("data", {}))

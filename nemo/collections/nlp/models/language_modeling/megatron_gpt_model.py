@@ -1080,6 +1080,12 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
         )
         return result
 
+    def setup_training_data(self, cfg):
+        pass
+    
+    def setup_validation_data(self, cfg):
+        pass
+    
     def setup_transformer_engine_tp_groups(self):
         """ This should be called after model parallel groups have been initialized
             and only needs to be called when using Transformer Engine.

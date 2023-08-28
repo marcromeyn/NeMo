@@ -28,7 +28,7 @@ def gpt_pre_training(
 ):
     from nemo.collections.nlp.models.language_modeling.megatron_gpt_model import MegatronGPTModel
     
-    if isinstance(config, DictConfig):        
+    if isinstance(config, DictConfig):
         gpt_config = GPTConfig.from_flattened_cfg(config)
     elif isinstance(config, GPTConfig):
         gpt_config = config
@@ -56,6 +56,7 @@ def gpt_pre_training(
 
 def gpt_peft(
     config: Union[DictConfig, GPTConfig],
+    peft_config: DictConfig, # TODO: Turn into config-class
     data,
     trainer: Union[DictConfig, Trainer],
     exp_manager: DictConfig # TODO: Turn this into config-class
@@ -63,8 +64,6 @@ def gpt_peft(
     from nemo.collections.nlp.models.language_modeling.megatron_gpt_model import MegatronGPTModel
     
     if isinstance(config, DictConfig):
-        config = OmegaConf.create(OmegaConf.to_container(config, resolve=True))
-        peft = config.peft
         with open_dict(config):
             del config.peft
             del config.data
@@ -101,13 +100,13 @@ def gpt_peft(
         return_config=True,
         save_restore_connector=base_model_save_restore_connector,
     )
-    base_model_cfg = _modify_config(base_model_cfg, cfg, data, add_cfg_to_tree=False)
+    base_model_cfg = _modify_config(base_model_cfg, cfg, peft_config, data, add_cfg_to_tree=False)
     save_restore_connector = PEFTSaveRestoreConnector(
-        peft_model_nemo_path=cfg.peft.restore_from_path, peft_model_ckpt_path=trainer.ckpt_path
+        peft_model_nemo_path=peft_config.restore_from_path, peft_model_ckpt_path=trainer.ckpt_path
     )
     if os.path.isdir(cfg.restore_from_path):
         save_restore_connector.model_extracted_dir = cfg.restore_from_path
-    peft_cls = _get_peft_scheme(cfg)
+    peft_cls = _get_peft_scheme(peft_config)
     model = peft_cls.restore_from(
         restore_path=cfg.restore_from_path,
         trainer=trainer,
@@ -117,7 +116,7 @@ def gpt_peft(
     
     trainer.fit(model)
     
-    return model, trainer
+    return model
         
         
 def default_trainer_strategy(config: GPTConfig) -> NLPDDPStrategy:
@@ -169,19 +168,19 @@ def _get_peft_scheme(cfg):
         MegatronGPTPTuningModel,
     )
     
-    if cfg.peft.peft_scheme == "adapter":
-        if cfg.peft.adapter_tuning.weight_tying:
+    if cfg.peft_scheme == "adapter":
+        if cfg.adapter_tuning.weight_tying:
             peft_cls = MegatronGPTAdapterModelWeightTying
         else:
             peft_cls = MegatronGPTAdapterModel
-    elif cfg.peft.peft_scheme == "ia3":
+    elif cfg.peft_scheme == "ia3":
         peft_cls = MegatronGPTIA3Model
-    elif cfg.peft.peft_scheme == "ptuning":
+    elif cfg.peft_scheme == "ptuning":
         peft_cls = MegatronGPTPTuningModel
-    elif cfg.peft.peft_scheme == "adapter_and_ptuning":
+    elif cfg.peft_scheme == "adapter_and_ptuning":
         peft_cls = MegatronGPTAdapterPTuningModel
-    elif cfg.peft.peft_scheme == "lora":
-        if cfg.peft.lora_tuning.weight_tying:
+    elif cfg.peft_scheme == "lora":
+        if cfg.lora_tuning.weight_tying:
             peft_cls = MegatronGPTLoRAModelWeightTying
         else:
             peft_cls = MegatronGPTLoRAModel
@@ -190,7 +189,7 @@ def _get_peft_scheme(cfg):
     return peft_cls
 
 
-def _modify_config(gpt_cfg, cfg, data_cfg, add_cfg_to_tree=False):
+def _modify_config(gpt_cfg, cfg, peft_cfg, data_cfg, add_cfg_to_tree=False):
     """
     This function modifies the original gpt pre-training config (gpt_cfg) with attributes from the finetuning config (cfg).
     The `add_cfg_to_tree` arg adds `cfg` to the top of the yaml tree which is needed for all `hparams.yaml` files when passed as an arg to `load_from_checkpoint()`.
@@ -220,8 +219,8 @@ def _modify_config(gpt_cfg, cfg, data_cfg, add_cfg_to_tree=False):
         gpt_cfg.attention_dropout = cfg.get('attention_dropout', 0.0)
         gpt_cfg.ffn_dropout = cfg.ffn_dropout
         
-        gpt_cfg.peft = cfg.peft
-        peft_cls = _get_peft_scheme(cfg)
+        gpt_cfg.peft = peft_cfg
+        peft_cls = _get_peft_scheme(peft_cfg)
         gpt_cfg.target = f"{peft_cls.__module__}.{peft_cls.__name__}"
 
         # This is needed when modifying a hparam file directly to load `.ckpt` files.

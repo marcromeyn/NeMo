@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from omegaconf.dictconfig import DictConfig
+from omegaconf import DictConfig, open_dict
 from pytorch_lightning.trainer.trainer import Trainer
 
 from nemo.collections.nlp.models.language_modeling.megatron_gpt_sft_model import MegatronGPTSFTModel
@@ -37,7 +37,12 @@ class MegatronGPTPEFTModel(MegatronGPTSFTModel):
     """
 
     def __init__(self, cfg: DictConfig, trainer: Trainer):
+        with open_dict(cfg):
+            peft = cfg.pop("peft")
         super().__init__(cfg, trainer)
+        with open_dict(self.cfg):
+            self.cfg.peft = peft
+        
         self.setup_complete = False
         self.base_keys = self.get_all_keys()
         self.freeze()

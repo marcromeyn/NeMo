@@ -80,24 +80,19 @@ class MegatronGPTSFTModel(MegatronGPTModel):
             )
         super().__init__(cfg, trainer=trainer)
         self.sep_id = cfg.get('sep_id', 49704)
-        if hasattr(self.cfg.data, "validation_ds"):
-            self.val_metric, self.val_metric_name = self.setup_metric(self.cfg.data.validation_ds)
-            self.val_metric = torch.nn.ModuleList(self.val_metric) if self.val_metric is not None else None
-            # Used other keys from metadata to calulate metrics
-            if hasattr(self.cfg.data.validation_ds, "metric"):
-                self.val_metric_label_key = self.cfg.data.validation_ds.metric.get('label_key', 'labels')
+        # if hasattr(self.cfg.data, "validation_ds"):
+        #     self.val_metric, self.val_metric_name = self.setup_metric(self.cfg.data.validation_ds)
+        #     self.val_metric = torch.nn.ModuleList(self.val_metric) if self.val_metric is not None else None
+        #     # Used other keys from metadata to calulate metrics
+        #     if hasattr(self.cfg.data.validation_ds, "metric"):
+        #         self.val_metric_label_key = self.cfg.data.validation_ds.metric.get('label_key', 'labels')
 
-        if hasattr(self.cfg.data, "test_ds"):
-            self.test_metric, self.test_metric_name = self.setup_metric(self.cfg.data.test_ds)
-            self.test_metric = torch.nn.ModuleList(self.test_metric) if self.test_metric is not None else None
-            # Used other keys from metadata to calulate metrics
-            if hasattr(self.cfg.data.test_ds, "metric"):
-                self.test_metric_label_key = self.cfg.data.test_ds.metric.get('label_key', 'labels')
-
-        if self.cfg.get('megatron_amp_O2', False):
-            base_module = self.model.module
-        else:
-            base_module = self.model
+        # if hasattr(self.cfg.data, "test_ds"):
+        #     self.test_metric, self.test_metric_name = self.setup_metric(self.cfg.data.test_ds)
+        #     self.test_metric = torch.nn.ModuleList(self.test_metric) if self.test_metric is not None else None
+        #     # Used other keys from metadata to calulate metrics
+        #     if hasattr(self.cfg.data.test_ds, "metric"):
+        #         self.test_metric_label_key = self.cfg.data.test_ds.metric.get('label_key', 'labels')
 
         self._reset_activation_checkpointing_args()
         self._reset_sequence_parallelism_args()
@@ -209,105 +204,105 @@ class MegatronGPTSFTModel(MegatronGPTModel):
         if self.cfg.get('transformer_engine', False):
             self.setup_transformer_engine_tp_groups()
 
-    def _build_dataset(self, data_cfg, is_train=True):
-        datasets = []
-        # Determine if we are using a single dataset or a list of datasets.
-        is_list_config = isinstance(data_cfg.file_names, ListConfig)
-        if not is_list_config:
-            raise ValueError(f"SFT train/validation datasets must be provided as a list of individual JSONL files.")
+    # def _build_dataset(self, data_cfg, is_train=True):
+    #     datasets = []
+    #     # Determine if we are using a single dataset or a list of datasets.
+    #     is_list_config = isinstance(data_cfg.file_names, ListConfig)
+    #     if not is_list_config:
+    #         raise ValueError(f"SFT train/validation datasets must be provided as a list of individual JSONL files.")
 
-        if is_train:
-            # Construct the data prefix list for `get_datasets_weights_and_num_samples()`
-            # that is of the format [weight1,file_name1,weight2,file_name2,...]
-            if data_cfg.concat_sampling_probabilities is None or not isinstance(
-                data_cfg.concat_sampling_probabilities, ListConfig
-            ):
-                raise ValueError(
-                    (
-                        f"concat_sampling_probabilities must be a ListConfig with the same number of files in file_names."
-                        f"Found: {data_cfg.concat_sampling_probabilities}"
-                    )
-                )
+    #     if is_train:
+    #         # Construct the data prefix list for `get_datasets_weights_and_num_samples()`
+    #         # that is of the format [weight1,file_name1,weight2,file_name2,...]
+    #         if data_cfg.concat_sampling_probabilities is None or not isinstance(
+    #             data_cfg.concat_sampling_probabilities, ListConfig
+    #         ):
+    #             raise ValueError(
+    #                 (
+    #                     f"concat_sampling_probabilities must be a ListConfig with the same number of files in file_names."
+    #                     f"Found: {data_cfg.concat_sampling_probabilities}"
+    #                 )
+    #             )
 
-            if len(data_cfg.get('concat_sampling_probabilities', None)) != len(data_cfg.file_names):
-                raise ValueError(
-                    (
-                        f"concat_sampling_probabilities must be of the same size as file_names.",
-                        f"Provided size {len(data_cfg.concat_sampling_probabilities)}, number of datasets {len(data_cfg.file_names)}",
-                    )
-                )
+    #         if len(data_cfg.get('concat_sampling_probabilities', None)) != len(data_cfg.file_names):
+    #             raise ValueError(
+    #                 (
+    #                     f"concat_sampling_probabilities must be of the same size as file_names.",
+    #                     f"Provided size {len(data_cfg.concat_sampling_probabilities)}, number of datasets {len(data_cfg.file_names)}",
+    #                 )
+    #             )
 
-            data_prefix = []
-            for weight, prefix in zip(data_cfg.concat_sampling_probabilities, data_cfg.file_names):
-                data_prefix.append(weight)
-                data_prefix.append(prefix)
+    #         data_prefix = []
+    #         for weight, prefix in zip(data_cfg.concat_sampling_probabilities, data_cfg.file_names):
+    #             data_prefix.append(weight)
+    #             data_prefix.append(prefix)
 
-            if self.trainer.max_steps is None or self.trainer.max_steps <= 0:
-                raise ValueError(
-                    f'Trainer max_steps must be set to a positive integer. Found {self.trainer.max_steps}'
-                )
-            num_train_samples = [self.trainer.max_steps * data_cfg.global_batch_size]
-            _, _, num_train_samples_per_dataset = get_datasets_weights_and_num_samples(data_prefix, num_train_samples)
-            num_train_samples_after_blend = sum([x[0] for x in num_train_samples_per_dataset])
-        else:
-            num_train_samples_per_dataset = [[None]] * len(data_cfg.file_names)
+    #         if self.trainer.max_steps is None or self.trainer.max_steps <= 0:
+    #             raise ValueError(
+    #                 f'Trainer max_steps must be set to a positive integer. Found {self.trainer.max_steps}'
+    #             )
+    #         num_train_samples = [self.trainer.max_steps * data_cfg.global_batch_size]
+    #         _, _, num_train_samples_per_dataset = get_datasets_weights_and_num_samples(data_prefix, num_train_samples)
+    #         num_train_samples_after_blend = sum([x[0] for x in num_train_samples_per_dataset])
+    #     else:
+    #         num_train_samples_per_dataset = [[None]] * len(data_cfg.file_names)
 
-        # Check dataset max_seq_legnth and max_position_embeddings size
-        if (
-            self.cfg.get('position_embedding_type', None) in [None, 'learned_absolute']
-            and data_cfg.max_seq_length > self.cfg.max_position_embeddings
-        ):
-            logging.warning(
-                f"Set dataset max_seq_length to max_position_embeddings {self.cfg.max_position_embeddings} if using learned_absolute position embedding"
-            )
-            data_cfg.max_seq_length = self.cfg.max_position_embeddings
+    #     # Check dataset max_seq_legnth and max_position_embeddings size
+    #     if (
+    #         self.cfg.get('position_embedding_type', None) in [None, 'learned_absolute']
+    #         and data_cfg.max_seq_length > self.cfg.max_position_embeddings
+    #     ):
+    #         logging.warning(
+    #             f"Set dataset max_seq_length to max_position_embeddings {self.cfg.max_position_embeddings} if using learned_absolute position embedding"
+    #         )
+    #         data_cfg.max_seq_length = self.cfg.max_position_embeddings
 
-        for file_path, num_samples in zip(data_cfg.file_names, num_train_samples_per_dataset):
-            if self.cfg.data.get("chat", False):
-                dataset_cls = GPTSFTChatDataset
-            else:
-                dataset_cls = GPTSFTDataset
-            dataset = dataset_cls(
-                file_path=file_path,
-                tokenizer=self.tokenizer,
-                max_seq_length=data_cfg.max_seq_length,
-                min_seq_length=data_cfg.min_seq_length,
-                add_bos=data_cfg.get('add_bos', False),
-                add_eos=data_cfg.get('add_eos', True),
-                add_sep=data_cfg.get('add_sep', False),
-                sep_id=self.sep_id,
-                max_num_samples=num_samples[0],
-                seed=data_cfg.get('seed', 1234),
-                context_key=data_cfg.get('context_key', 'text'),
-                label_key=data_cfg.get('label_key', 'answer'),
-                separate_prompt_and_response_with_newline=data_cfg.get(
-                    'separate_prompt_and_response_with_newline', True
-                ),
-                answer_only_loss=self.cfg.get('answer_only_loss', True),
-                truncation_field=data_cfg.get('truncation_field', 'context'),
-                pad_to_max_length=data_cfg.get('pad_to_max_length', False),
-                index_mapping_dir=data_cfg.get('index_mapping_dir', None),
-                prompt_template=data_cfg.get('prompt_template', None),
-                virtual_tokens=self.virtual_tokens,
-                tokens_to_generate=data_cfg.get(
-                    'tokens_to_generate', 0
-                ),  # used at inference time to allocate tensor positions for tokens that will be generated by inf procedure.
-                memmap_workers=data_cfg.get(
-                    'memmap_workers', None
-                ),  # used to set num. of workers to create the memmap index files
-                hf_dataset=data_cfg.get(
-                    'hf_dataset', False
-                ),  # Whether to load the json file with the HuggingFace dataset. otherwise, will load the jsonl file with the JSONLMemMapDataset.
-            )
-            datasets.append(dataset)
+    #     for file_path, num_samples in zip(data_cfg.file_names, num_train_samples_per_dataset):
+    #         if self.cfg.data.get("chat", False):
+    #             dataset_cls = GPTSFTChatDataset
+    #         else:
+    #             dataset_cls = GPTSFTDataset
+    #         dataset = dataset_cls(
+    #             file_path=file_path,
+    #             tokenizer=self.tokenizer,
+    #             max_seq_length=data_cfg.max_seq_length,
+    #             min_seq_length=data_cfg.min_seq_length,
+    #             add_bos=data_cfg.get('add_bos', False),
+    #             add_eos=data_cfg.get('add_eos', True),
+    #             add_sep=data_cfg.get('add_sep', False),
+    #             sep_id=self.sep_id,
+    #             max_num_samples=num_samples[0],
+    #             seed=data_cfg.get('seed', 1234),
+    #             context_key=data_cfg.get('context_key', 'text'),
+    #             label_key=data_cfg.get('label_key', 'answer'),
+    #             separate_prompt_and_response_with_newline=data_cfg.get(
+    #                 'separate_prompt_and_response_with_newline', True
+    #             ),
+    #             answer_only_loss=self.cfg.get('answer_only_loss', True),
+    #             truncation_field=data_cfg.get('truncation_field', 'context'),
+    #             pad_to_max_length=data_cfg.get('pad_to_max_length', False),
+    #             index_mapping_dir=data_cfg.get('index_mapping_dir', None),
+    #             prompt_template=data_cfg.get('prompt_template', None),
+    #             virtual_tokens=self.virtual_tokens,
+    #             tokens_to_generate=data_cfg.get(
+    #                 'tokens_to_generate', 0
+    #             ),  # used at inference time to allocate tensor positions for tokens that will be generated by inf procedure.
+    #             memmap_workers=data_cfg.get(
+    #                 'memmap_workers', None
+    #             ),  # used to set num. of workers to create the memmap index files
+    #             hf_dataset=data_cfg.get(
+    #                 'hf_dataset', False
+    #             ),  # Whether to load the json file with the HuggingFace dataset. otherwise, will load the jsonl file with the JSONLMemMapDataset.
+    #         )
+    #         datasets.append(dataset)
 
-        if is_train:
-            dataset = BlendableDataset(
-                datasets=datasets, weights=data_cfg.concat_sampling_probabilities, size=num_train_samples_after_blend
-            )
-            return dataset
-        else:
-            return datasets
+    #     if is_train:
+    #         dataset = BlendableDataset(
+    #             datasets=datasets, weights=data_cfg.concat_sampling_probabilities, size=num_train_samples_after_blend
+    #         )
+    #         return dataset
+    #     else:
+    #         return datasets
 
     def _determine_log_key(self, data_config, dataloader_idx, metric_name, mode):
         # Function that determines whether to log based on the user provided name of the dataset or the dataloader index.
@@ -746,66 +741,66 @@ class MegatronGPTSFTModel(MegatronGPTModel):
                     data_parallel_size=parallel_state.get_data_parallel_world_size(),
                 )
 
-    def build_train_valid_test_datasets(self, stage):
-        if stage != 'test':
-            logging.info('Building GPT SFT validation datasets.')
-            # Wrap this in a list since the general finetuning parent class supports multi-validation.
-            self._validation_ds = self._build_dataset(self.cfg.data.validation_ds, is_train=False)
-            logging.info(f'Length of val dataset: {len(self._validation_ds[0])}')
+    # def build_train_valid_test_datasets(self, stage):
+    #     if stage != 'test':
+    #         logging.info('Building GPT SFT validation datasets.')
+    #         # Wrap this in a list since the general finetuning parent class supports multi-validation.
+    #         self._validation_ds = self._build_dataset(self.cfg.data.validation_ds, is_train=False)
+    #         logging.info(f'Length of val dataset: {len(self._validation_ds[0])}')
 
-        if stage != 'validate':
-            if hasattr(self.cfg.data, 'test_ds'):
-                logging.info('Building GPT SFT test datasets.')
-                # Wrap this in a list since the general finetuning parent class supports multi-validation.
-                self._test_ds = self._build_dataset(self.cfg.data.test_ds, is_train=False)
-                logging.info(f'Length of test dataset: {len(self._test_ds[0])}')
+    #     if stage != 'validate':
+    #         if hasattr(self.cfg.data, 'test_ds'):
+    #             logging.info('Building GPT SFT test datasets.')
+    #             # Wrap this in a list since the general finetuning parent class supports multi-validation.
+    #             self._test_ds = self._build_dataset(self.cfg.data.test_ds, is_train=False)
+    #             logging.info(f'Length of test dataset: {len(self._test_ds[0])}')
 
-        if stage == 'validate' or stage == 'test':
-            return
-        logging.info('Building GPT SFT traing datasets.')
-        self._train_ds = self._build_dataset(self.cfg.data.train_ds)
-        logging.info(f'Length of train dataset: {len(self._train_ds)}')
+    #     if stage == 'validate' or stage == 'test':
+    #         return
+    #     logging.info('Building GPT SFT traing datasets.')
+    #     self._train_ds = self._build_dataset(self.cfg.data.train_ds)
+    #     logging.info(f'Length of train dataset: {len(self._train_ds)}')
 
-    def build_data_loader(self, dataset, data_cfg, consumed_samples=0):
-        """Buld dataloader given an input dataset."""
+    # def build_data_loader(self, dataset, data_cfg, consumed_samples=0):
+    #     """Buld dataloader given an input dataset."""
 
-        logging.info(f'Building dataloader with consumed samples: {consumed_samples}')
-        if isinstance(dataset, BlendableDataset):
-            collate_fn = dataset.datasets[0].collate_fn
-        else:
-            collate_fn = dataset.collate_fn
+    #     logging.info(f'Building dataloader with consumed samples: {consumed_samples}')
+    #     if isinstance(dataset, BlendableDataset):
+    #         collate_fn = dataset.datasets[0].collate_fn
+    #     else:
+    #         collate_fn = dataset.collate_fn
 
-        batch_sampler = MegatronPretrainingBatchSampler(
-            total_samples=len(dataset),
-            consumed_samples=consumed_samples,
-            micro_batch_size=data_cfg.micro_batch_size,
-            global_batch_size=data_cfg.global_batch_size,
-            data_parallel_rank=parallel_state.get_data_parallel_rank(),
-            data_parallel_size=parallel_state.get_data_parallel_world_size(),
-            drop_last=data_cfg.drop_last,
-            pad_samples_to_global_batch_size=not data_cfg.drop_last,
-        )
-        return torch.utils.data.DataLoader(
-            dataset,
-            batch_sampler=batch_sampler,
-            collate_fn=collate_fn,
-            num_workers=data_cfg.num_workers,
-            pin_memory=data_cfg.pin_memory,
-        )
+    #     batch_sampler = MegatronPretrainingBatchSampler(
+    #         total_samples=len(dataset),
+    #         consumed_samples=consumed_samples,
+    #         micro_batch_size=data_cfg.micro_batch_size,
+    #         global_batch_size=data_cfg.global_batch_size,
+    #         data_parallel_rank=parallel_state.get_data_parallel_rank(),
+    #         data_parallel_size=parallel_state.get_data_parallel_world_size(),
+    #         drop_last=data_cfg.drop_last,
+    #         pad_samples_to_global_batch_size=not data_cfg.drop_last,
+    #     )
+    #     return torch.utils.data.DataLoader(
+    #         dataset,
+    #         batch_sampler=batch_sampler,
+    #         collate_fn=collate_fn,
+    #         num_workers=data_cfg.num_workers,
+    #         pin_memory=data_cfg.pin_memory,
+    #     )
 
-    def setup_training_dataloader(self):
-        if hasattr(self, '_train_ds'):
-            consumed_samples = self.compute_consumed_samples(0)
-            self._train_dl = self.build_data_loader(
-                dataset=self._train_ds, data_cfg=self.cfg.data.train_ds, consumed_samples=consumed_samples,
-            )
+    # def setup_training_dataloader(self):
+    #     if hasattr(self, '_train_ds'):
+    #         consumed_samples = self.compute_consumed_samples(0)
+    #         self._train_dl = self.build_data_loader(
+    #             dataset=self._train_ds, data_cfg=self.cfg.data.train_ds, consumed_samples=consumed_samples,
+    #         )
 
-    def setup_eval_dataloader(self, datasets, data_cfg):
-        dataloaders = []
-        for dataset in datasets:
-            eval_dl = self.build_data_loader(dataset=dataset, data_cfg=data_cfg, consumed_samples=0,)
-            dataloaders.append(eval_dl)
-        return dataloaders
+    # def setup_eval_dataloader(self, datasets, data_cfg):
+    #     dataloaders = []
+    #     for dataset in datasets:
+    #         eval_dl = self.build_data_loader(dataset=dataset, data_cfg=data_cfg, consumed_samples=0,)
+    #         dataloaders.append(eval_dl)
+    #     return dataloaders
 
     def on_validation_epoch_start(self):
         self._reset_activation_checkpointing_args()
