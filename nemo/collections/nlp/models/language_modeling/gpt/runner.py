@@ -1,8 +1,8 @@
 import os
-from typing import Tuple, Union
+from typing import Union
 
 from omegaconf import OmegaConf, DictConfig, open_dict
-from pytorch_lightning import Trainer
+from pytorch_lightning import Trainer, LightningDataModule
 from pytorch_lightning.plugins.environments import TorchElasticEnvironment
 from nemo.collections.nlp.models.language_modeling.gpt.config import GPTConfig
 from nemo.collections.nlp.models.language_modeling.gpt.data import (
@@ -22,7 +22,7 @@ from nemo.utils.exp_manager import exp_manager as exp_manager_fn
 
 def gpt_pre_training(
     config: Union[DictConfig, GPTConfig],
-    data: Union[DictConfig, GPTPretrainDatasetConfig],
+    data: Union[DictConfig, GPTPretrainDatasetConfig, LightningDataModule],
     trainer: Union[DictConfig, Trainer],
     exp_manager: DictConfig # TODO: Turn this into config-class
 ):
@@ -40,14 +40,15 @@ def gpt_pre_training(
             plugins=default_trainer_plugins(gpt_config, trainer.precision), 
             strategy=default_trainer_strategy(gpt_config), 
             **trainer
-        )    
+        )
         
     exp_manager_fn(trainer, exp_manager)
     model = MegatronGPTModel(gpt_config, trainer)
     
     if isinstance(data, DictConfig):
-        data_config = GPTPretrainDatasetConfig(**data)
-        data = GPTPreTrainingDataset(data_config, gpt_config)
+        data = GPTPretrainDatasetConfig(**data)
+    if isinstance(data, GPTPretrainDatasetConfig):
+        data = GPTPreTrainingDataset(data, gpt_config)
 
     trainer.fit(model, data)
     
