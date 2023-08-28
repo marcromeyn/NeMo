@@ -5,6 +5,10 @@ from omegaconf import OmegaConf, DictConfig, open_dict
 from pytorch_lightning import Trainer
 from pytorch_lightning.plugins.environments import TorchElasticEnvironment
 from nemo.collections.nlp.models.language_modeling.gpt.config import GPTConfig
+from nemo.collections.nlp.models.language_modeling.gpt.data import (
+    GPTPretrainDatasetConfig,
+    GPTPreTrainingDataset
+)
 from nemo.collections.nlp.parts.nlp_overrides import (
     GradScaler,
     MegatronHalfPrecisionPlugin,
@@ -17,17 +21,59 @@ from nemo.utils.exp_manager import exp_manager as exp_manager_fn
 
 
 def gpt_pre_training(
-    config: Union[OmegaConf, GPTConfig],
-    trainer: Union[OmegaConf, Trainer],
-    exp_manager: OmegaConf # TODO: Turn this into config-class
+    config: Union[DictConfig, GPTConfig],
+    data: Union[DictConfig, GPTPretrainDatasetConfig],
+    trainer: Union[DictConfig, Trainer],
+    exp_manager: DictConfig # TODO: Turn this into config-class
+):
+    from nemo.collections.nlp.models.language_modeling.megatron_gpt_model import MegatronGPTModel
+    
+    if isinstance(config, DictConfig):        
+        gpt_config = GPTConfig.from_flattened_cfg(config)
+    elif isinstance(config, GPTConfig):
+        gpt_config = config
+    else:
+        raise ValueError(f"Please provide a DictConfig or GPTConfig, got: {config}")
+    
+    if isinstance(trainer, DictConfig):
+        trainer = Trainer(
+            plugins=default_trainer_plugins(gpt_config, trainer.precision), 
+            strategy=default_trainer_strategy(gpt_config), 
+            **trainer
+        )    
+        
+    exp_manager_fn(trainer, exp_manager)
+    model = MegatronGPTModel(gpt_config, trainer)
+    
+    if isinstance(data, DictConfig):
+        data_config = GPTPretrainDatasetConfig(**data)
+        data = GPTPreTrainingDataset(data_config, gpt_config)
+
+    trainer.fit(model, data)
+    
+    return model
+
+
+def gpt_peft(
+    config: Union[DictConfig, GPTConfig],
+    data,
+    trainer: Union[DictConfig, Trainer],
+    exp_manager: DictConfig # TODO: Turn this into config-class
 ):
     from nemo.collections.nlp.models.language_modeling.megatron_gpt_model import MegatronGPTModel
     
     if isinstance(config, DictConfig):
-        cfg = config
-        gpt_config = GPTConfig.from_flattened_cfg(config)
+        config = OmegaConf.create(OmegaConf.to_container(config, resolve=True))
+        peft = config.peft
+        with open_dict(config):
+            del config.peft
+            del config.data
+        
+        gpt_config = GPTConfig.from_flattened_cfg(config)        
+    elif isinstance(config, GPTConfig):
+        gpt_config = config
     else:
-        raise NotImplementedError()    
+        raise ValueError(f"Please provide a DictConfig or GPTConfig, got: {config}")
     
     if isinstance(trainer, DictConfig):
         trainer = Trainer(
@@ -38,61 +84,24 @@ def gpt_pre_training(
         
     exp_manager_fn(trainer, exp_manager)
     
-    # TODO: Where to add this snippet when model_config can be passed to MegatronGPTModel?
-    # hydra interpolation does not work here as the interpolation key is lost when PTL saves hparams
-    with open_dict(cfg):
-        cfg.model.precision = cfg.trainer.precision
-
+    cfg = gpt_config.to_cfg(trainer.precision)
     
-    model = MegatronGPTModel(cfg, trainer)
-
-    trainer.fit(model)
-    
-    return model, trainer
-
-
-def gpt_peft(
-    config: Union[OmegaConf, GPTConfig],
-    trainer: Union[OmegaConf, Trainer],
-    exp_manager: OmegaConf # TODO: Turn this into config-class
-):
-    from nemo.collections.nlp.models.language_modeling.megatron_gpt_model import MegatronGPTModel
-    
-    if isinstance(config, DictConfig):
-        cfg = config
-        # gpt_config = GPTConfig.from_flattened_cfg(config)
-    else:
-        raise NotImplementedError()    
-    
-    if isinstance(trainer, DictConfig):
-        cfg_trainer = trainer
-        trainer = Trainer(
-            plugins=default_trainer_plugins(cfg, trainer.precision), 
-            strategy=default_trainer_strategy(cfg), 
-            **trainer
-        )
-        
-    exp_manager_fn(trainer, exp_manager)
-    
-    if not cfg.get("restore_from_path", False):
+    if not gpt_config.restore_from_path:
         raise RuntimeError("PEFT training needs a trained base model present.")
     
-    if cfg.resume_from_checkpoint is not None:
-        trainer.ckpt_path = cfg.resume_from_checkpoint
-        
-    with open_dict(cfg):
-        cfg.precision = cfg_trainer.precision
+    if gpt_config.resume_from_checkpoint is not None:
+        trainer.ckpt_path = gpt_config.resume_from_checkpoint
         
     base_model_save_restore_connector = NLPSaveRestoreConnector()
-    if os.path.isdir(cfg.restore_from_path):
-        base_model_save_restore_connector.model_extracted_dir = cfg.restore_from_path
+    if os.path.isdir(gpt_config.restore_from_path):
+        base_model_save_restore_connector.model_extracted_dir = gpt_config.restore_from_path
     base_model_cfg = MegatronGPTModel.restore_from(
-        restore_path=cfg.restore_from_path,
+        restore_path=gpt_config.restore_from_path,
         trainer=trainer,
         return_config=True,
         save_restore_connector=base_model_save_restore_connector,
     )
-    base_model_cfg = _modify_config(base_model_cfg, cfg, add_cfg_to_tree=False)
+    base_model_cfg = _modify_config(base_model_cfg, cfg, data, add_cfg_to_tree=False)
     save_restore_connector = PEFTSaveRestoreConnector(
         peft_model_nemo_path=cfg.peft.restore_from_path, peft_model_ckpt_path=trainer.ckpt_path
     )
@@ -181,7 +190,7 @@ def _get_peft_scheme(cfg):
     return peft_cls
 
 
-def _modify_config(gpt_cfg, cfg, add_cfg_to_tree=False):
+def _modify_config(gpt_cfg, cfg, data_cfg, add_cfg_to_tree=False):
     """
     This function modifies the original gpt pre-training config (gpt_cfg) with attributes from the finetuning config (cfg).
     The `add_cfg_to_tree` arg adds `cfg` to the top of the yaml tree which is needed for all `hparams.yaml` files when passed as an arg to `load_from_checkpoint()`.
@@ -190,8 +199,8 @@ def _modify_config(gpt_cfg, cfg, add_cfg_to_tree=False):
     OmegaConf.resolve(cfg)
     with open_dict(gpt_cfg):
         gpt_cfg.megatron_amp_O2 = cfg.get('megatron_amp_O2', False)
-        gpt_cfg.micro_batch_size = cfg.data.train_ds.micro_batch_size
-        gpt_cfg.global_batch_size = cfg.data.train_ds.global_batch_size
+        gpt_cfg.micro_batch_size = data_cfg.train_ds.micro_batch_size
+        gpt_cfg.global_batch_size = data_cfg.train_ds.global_batch_size
         gpt_cfg.sequence_parallel = cfg.get("sequence_parallel", False)
         gpt_cfg.activations_checkpoint_granularity = cfg.get("activations_checkpoint_granularity", None)
         gpt_cfg.activations_checkpoint_num_layers = cfg.get("activations_checkpoint_num_layers", None)
@@ -199,7 +208,7 @@ def _modify_config(gpt_cfg, cfg, add_cfg_to_tree=False):
         gpt_cfg.activations_checkpoint_layers_per_pipeline = cfg.get(
             "activations_checkpoint_layers_per_pipeline", None
         )
-        gpt_cfg.data = cfg.data
+        gpt_cfg.data = data_cfg
         gpt_cfg.optim = cfg.optim
         gpt_cfg.precision = cfg.precision
         gpt_cfg.answer_only_loss = cfg.answer_only_loss
@@ -210,6 +219,7 @@ def _modify_config(gpt_cfg, cfg, add_cfg_to_tree=False):
         gpt_cfg.hidden_dropout = cfg.get('hidden_dropout', 0.0)
         gpt_cfg.attention_dropout = cfg.get('attention_dropout', 0.0)
         gpt_cfg.ffn_dropout = cfg.ffn_dropout
+        
         gpt_cfg.peft = cfg.peft
         peft_cls = _get_peft_scheme(cfg)
         gpt_cfg.target = f"{peft_cls.__module__}.{peft_cls.__name__}"

@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import itertools
+import inspect
 import queue
 import warnings
 from dataclasses import fields
@@ -210,6 +211,16 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
             )
         # this prevents base constructor from initializing tokenizer
         self.tokenizer = None
+        
+        if isinstance(cfg, DictConfig):
+            cfg = GPTConfig.from_flattened_cfg(cfg)
+        
+        if isinstance(cfg, GPTConfig):
+            self.config = cfg
+            cfg = self.config.to_cfg(trainer.precision)
+        else:
+            raise ValueError(f"Please provide a DictConfig or GPTConfig, got: {cfg}")
+        
         super().__init__(cfg, trainer=trainer, no_lm_init=True)
 
         self._validate_trainer()
@@ -217,17 +228,17 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
         # build the transformer config
         self.transformer_config = self.build_transformer_config()
 
-        self.megatron_amp_o2 = cfg.get('megatron_amp_O2', False)
+        self.megatron_amp_o2 = self.config.megatron_amp_O2
 
-        self.mcore_gpt = cfg.get('mcore_gpt', False)
+        self.mcore_gpt = self.config.mcore_gpt
 
-        self.rampup_batch_size = self.cfg.get('rampup_batch_size', None)
+        self.rampup_batch_size = self.config.rampup_batch_size
         if self.rampup_batch_size:
             self.prev_consumed_samples = 0
             self.if_first_step = 0
             self.prev_global_batch_size = None
 
-        if not self.megatron_amp_o2 and self.cfg.get('virtual_pipeline_model_parallel_size', None):
+        if not self.megatron_amp_o2 and self.config.virtual_pipeline_model_parallel_size:
             raise ValueError('Virtual pipeline model parallel is only supported when using megatron_amp_O2')
 
         # build_model returns a list of modules which are used for interleaved pipeline parallelism
@@ -236,17 +247,17 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
                 model_provider_func=self.model_provider_func,
                 wrap_with_ddp=False,
                 on_cpu=True,
-                virtual_pipeline_model_parallel_size=self.cfg.get('virtual_pipeline_model_parallel_size', None),
+                virtual_pipeline_model_parallel_size=self.config.virtual_pipeline_model_parallel_size,
             )
         else:
             self.model = build_model(
                 model_provider_func=self.model_provider_func,
                 wrap_with_ddp=False,
-                virtual_pipeline_model_parallel_size=self.cfg.get('virtual_pipeline_model_parallel_size', None),
+                virtual_pipeline_model_parallel_size=self.config.virtual_pipeline_model_parallel_size,
             )
 
         # if we're not using interleaved, then self.model is a module.
-        if self.cfg.get('virtual_pipeline_model_parallel_size', None) is None:
+        if self.config.virtual_pipeline_model_parallel_size is None:
             self.model = self.model[0]
 
         if self.megatron_amp_o2:
@@ -274,21 +285,21 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
             True if (not self.megatron_amp_o2) and (self.autocast_dtype in [torch.float16, torch.bfloat16]) else False
         )
 
-        self.transformer_engine = cfg.get('transformer_engine', False)
+        self.transformer_engine = self.config.transformer_engine
 
         # configuration used for inference
         self._inference_config = None
 
         # Convert the global-batch-based profile index to micro-batch index
         if hasattr(self, '_nsys_profile_enabled'):
-            mp_size = cfg.get('tensor_model_parallel_size', 1) * cfg.get('pipeline_model_parallel_size', 1)
+            mp_size = self.config.tensor_model_parallel_size * self.config.pipeline_model_parallel_size
             data_parallel_world_size = trainer.world_size // mp_size
-            grad_accum_steps = cfg.get('global_batch_size') // (cfg.get('micro_batch_size') * data_parallel_world_size)
+            grad_accum_steps = self.config.global_batch_size // (self.config.micro_batch_size * data_parallel_world_size)
             self._nsys_profile_start_step *= grad_accum_steps
             self._nsys_profile_end_step *= grad_accum_steps
 
-        self.get_attention_mask_from_fusion = self.cfg.get('get_attention_mask_from_fusion', True)
-        self.initialize_ub = self.cfg.get('ub_tp_comm_overlap', False)
+        self.get_attention_mask_from_fusion = self.config.get_attention_mask_from_fusion
+        self.initialize_ub = self.config.ub_tp_comm_overlap
 
     def get_gpt_module_list(self):
         if isinstance(self.model, list):
@@ -313,80 +324,36 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
             model = MCoreGPTModel(
                 config=self.transformer_config,
                 vocab_size=self.cfg.get('override_vocab_size', self.padded_vocab_size),
-                max_sequence_length=self.cfg.get('encoder_seq_length', 512),
+                max_sequence_length=self.config.encoder_seq_length,
                 pre_process=pre_process,
                 post_process=post_process,
                 parallel_output=True,
-                share_embeddings_and_output_weights=self.cfg.get('share_embeddings_and_output_weights', True),
-                position_embedding_type=self.cfg.get('position_embedding_type', 'learned_absolute'),
-                rotary_percent=self.cfg.get('rotary_percentage', 1.0),
+                share_embeddings_and_output_weights=self.config.share_embeddings_and_output_weights,
+                position_embedding_type=self.config.position_embedding_type,
+                rotary_percent=self.config.rotary_percentage,
             )
         else:
             assert (
                 self.cfg.get('num_query_groups', None) is None
             ), "Group Query Attention is only supported in Megatron Core. Set 'mcore_gpt' to use GQA."
-
-            model = GPTModel(
+            
+            _params = dict(
                 config=self.model_parallel_config,
                 vocab_size=self.cfg.get('override_vocab_size', self.padded_vocab_size),
-                hidden_size=self.cfg.hidden_size,
-                max_position_embeddings=self.cfg.max_position_embeddings,
-                num_layers=self.cfg.num_layers,
-                num_attention_heads=self.cfg.num_attention_heads,
-                apply_query_key_layer_scaling=self.cfg.get('apply_query_key_layer_scaling', True),
-                kv_channels=self.cfg.get('kv_channels', None),
-                ffn_hidden_size=self.cfg.ffn_hidden_size,
                 num_tokentypes=0,
                 parallel_output=True,
                 pre_process=pre_process,
                 post_process=post_process,
-                init_method_std=self.cfg.get('init_method_std', 0.02),
-                use_scaled_init_method=self.cfg.get('use_scaled_init_method', True),
-                fp16_lm_cross_entropy=self.cfg.get('fp16_lm_cross_entropy', False),
-                megatron_amp_O2=self.cfg.get('megatron_amp_O2', False),
-                hidden_dropout=self.cfg.get('hidden_dropout', 0.1),
-                attention_dropout=self.cfg.get('attention_dropout', 0.1),
-                ffn_dropout=self.cfg.get('ffn_dropout', 0.0),
-                precision=self.cfg.get('precision', 16),
-                fp32_residual_connection=self.cfg.get('fp32_residual_connection', False),
-                activations_checkpoint_granularity=self.cfg.get('activations_checkpoint_granularity', None),
-                activations_checkpoint_method=self.cfg.get('activations_checkpoint_method', None),
-                activations_checkpoint_num_layers=self.cfg.get('activations_checkpoint_num_layers', 1),
-                activations_checkpoint_layers_per_pipeline=self.cfg.get(
-                    'activations_checkpoint_layers_per_pipeline', None
-                ),
-                normalization=self.cfg.get('normalization', 'layernorm'),
-                layernorm_epsilon=self.cfg.get('layernorm_epsilon', 1e-5),
-                onnx_safe=self.cfg.get('onnx_safe', False),
-                bias=self.cfg.get('bias', True),
-                bias_activation_fusion=self.cfg.get('bias_activation_fusion', True),
-                bias_dropout_add_fusion=self.cfg.get('bias_dropout_add_fusion', True),
-                activation=self.cfg.get('activation', 'gelu'),
-                headscale=self.cfg.get('headscale', False),
-                transformer_block_type=self.cfg.get('transformer_block_type', 'pre_ln'),
-                openai_gelu=self.cfg.get('openai_gelu', False),
-                normalize_attention_scores=self.cfg.get('normalize_attention_scores', True),
-                position_embedding_type=self.cfg.get('position_embedding_type', 'learned_absolute'),
-                rotary_percentage=self.cfg.get('rotary_percentage', 1.0),
-                share_embeddings_and_output_weights=self.cfg.get('share_embeddings_and_output_weights', True),
-                attention_type=self.cfg.get('attention_type', 'multihead'),
-                masked_softmax_fusion=self.cfg.get('masked_softmax_fusion', True),
-                persist_layer_norm=self.cfg.get('persist_layer_norm', False),
-                transformer_engine=self.cfg.get('transformer_engine', False),
-                fp8=self.cfg.get('fp8', False),
-                fp8_e4m3=self.cfg.get('fp8_e4m3', False),
-                fp8_hybrid=self.cfg.get('fp8_hybrid', False),
-                fp8_margin=self.cfg.get('fp8_margin', 0),
-                fp8_interval=self.cfg.get('fp8_interval', 1),
-                fp8_amax_history_len=self.cfg.get('fp8_amax_history_len', 1),
-                fp8_amax_compute_algo=self.cfg.get('fp8_amax_compute_algo', 'most_recent'),
-                reduce_amax=self.cfg.get('reduce_amax', True),
-                use_emha=self.cfg.get('use_emha', False),
-                ub_tp_comm_overlap=self.cfg.get('ub_tp_comm_overlap', False),
-                use_flash_attention=self.cfg.get('use_flash_attention', False),
                 megatron_legacy=self.cfg.get('megatron_legacy', False),
-                seq_len_interpolation_factor=self.cfg.get('seq_len_interpolation_factor', None),
+                precision=self.cfg.precision
             )
+            
+            param_names = inspect.signature(GPTModel.__init__).parameters.keys()
+            for key in param_names:
+                if key not in _params and key != "self":
+                    _params[key] = getattr(self.config, key)
+
+            model = GPTModel(**_params)
         return model
 
     def setup_optimizer_param_groups(self):
@@ -510,8 +477,8 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
             model=self.model,
             num_microbatches=get_num_microbatches(),
             forward_only=forward_only,
-            seq_length=self.cfg.encoder_seq_length,
-            micro_batch_size=self.cfg.micro_batch_size,
+            seq_length=self.config.encoder_seq_length,
+            micro_batch_size=self.config.micro_batch_size,
         )
 
         # only the last stages of the pipeline return losses
@@ -544,21 +511,21 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
         return loss_mean
 
     def initialize_ub_func(self):
-        ub_cfgs = self.cfg.get('ub_tp_comm_overlap_cfg', None)
+        ub_cfgs = self.config.ub_tp_comm_overlap_cfg
         if ub_cfgs is None:
             warnings.warn(
                 "Couldn't find TP config. Please check the path correctness. Initializing TP comm overlap with the default config."
             )
 
         input_shape = [
-            self.cfg.get('encoder_seq_length') * self.cfg.get('micro_batch_size'),
-            self.cfg.get('hidden_size'),
+            self.config.encoder_seq_length * self.config.micro_batch_size,
+            self.config.hidden_size,
         ]
 
         te_module.base.initialize_ub(
             shape=input_shape,
-            tp_size=self.cfg.get('tensor_model_parallel_size'),
-            use_fp8=self.cfg.get('fp8'),
+            tp_size=self.config.tensor_model_parallel_size,
+            use_fp8=self.config.fp8,
             ub_cfgs=ub_cfgs,
         )
         self.initialize_ub = False
@@ -605,7 +572,7 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
         loss_mean = self.fwd_bwd_step(dataloader_iter, batch_idx, False)
 
         # when using sequence parallelism, the sequence parallel layernorm grads must be all-reduced
-        if self.cfg.get('tensor_model_parallel_size', 1) > 1 and self.cfg.get('sequence_parallel', False):
+        if self.config.tensor_model_parallel_size > 1 and self.config.sequence_parallel:
             self.allreduce_sequence_parallel_gradients()
 
         if self.with_distributed_adam:
@@ -615,7 +582,7 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
             self._optimizer._finish_bucket_grad_sync()
         elif self.megatron_amp_o2:
             # when using pipeline parallelism grads must be all-reduced after the pipeline (not asynchronously)
-            if self.cfg.get('pipeline_model_parallel_size', 1) > 1 or self.cfg.get('sequence_parallel', False):
+            if self.config.pipeline_model_parallel_size > 1 or self.config.sequence_parallel:
                 # main grads are stored in the MainParamsOptimizer wrapper
                 self._optimizer.allreduce_main_grads()
         else:
@@ -623,7 +590,7 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
             # so we all-reduce gradients after the pipeline
             self.allreduce_gradients()  # @sangkug we think this is causing memory to blow up (hurts perf)
 
-        if self.cfg.get('pipeline_model_parallel_size', 1) > 1 and self.cfg.get(
+        if self.config.pipeline_model_parallel_size > 1 and self.cfg.get(
             'share_embeddings_and_output_weights', True
         ):
             # when using pipeline parallelism the first and last stage must keep embeddings in sync
@@ -635,7 +602,7 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
         torch.distributed.broadcast(loss_mean, get_last_rank())
 
         # (@adithyare) we need to check for the _scaler attribute to enable pp>1 for adapter training
-        if self.cfg.precision == 16 and hasattr(self.trainer.precision_plugin.scaler, "_scale"):
+        if self.config.precision == 16 and hasattr(self.trainer.precision_plugin.scaler, "_scale"):
             loss_scale = self.trainer.precision_plugin.scaler._scale
             if loss_scale is not None:
                 self.log('loss_scale', loss_scale, batch_size=1)
@@ -966,90 +933,6 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
         loss = torch.sum(losses.view(-1) * loss_mask) / loss_mask.sum()  # sequence level nll
         return loss
 
-    def build_train_valid_test_datasets(self):
-        logging.info('Building GPT datasets.')
-        if self.trainer.limit_val_batches > 1.0 and isinstance(self.trainer.limit_val_batches, float):
-            raise ValueError("limit_val_batches must be an integer or float less than or equal to 1.0.")
-        global_batch_size = self.cfg.global_batch_size
-        max_train_steps = self.trainer.max_steps
-        eval_iters = (max_train_steps // self.trainer.val_check_interval + 1) * self.trainer.limit_val_batches
-        test_iters = self.trainer.limit_test_batches
-
-        train_valid_test_num_samples = [
-            max_train_steps * global_batch_size,
-            eval_iters * global_batch_size,
-            test_iters * global_batch_size,
-        ]
-
-        if self.trainer.limit_val_batches <= 1.0 and isinstance(self.trainer.limit_val_batches, float):
-            train_valid_test_num_samples[
-                1
-            ] = 1  # This is to make sure we only have one epoch on every validation iteration
-
-        self._train_ds, self._validation_ds, self._test_ds = build_train_valid_test_datasets(
-            cfg=self.cfg,
-            trainer=self.trainer,
-            data_prefix=self.cfg.data.data_prefix,
-            data_impl=self.cfg.data.data_impl,
-            splits_string=self.cfg.data.splits_string,
-            train_valid_test_num_samples=train_valid_test_num_samples,
-            seq_length=self.cfg.data.seq_length,
-            seed=self.cfg.seed,
-            skip_warmup=self.cfg.data.get('skip_warmup', True),
-            tokenizer=self.tokenizer,
-        )
-        if self._train_ds is not None:
-            logging.info(f'Length of train dataset: {len(self._train_ds)}')
-        if self._validation_ds is not None:
-            logging.info(f'Length of val dataset: {len(self._validation_ds)}')
-        if self._test_ds is not None:
-            logging.info(f'Length of test dataset: {len(self._test_ds)}')
-        logging.info(f'Finished building GPT datasets.')
-
-        return self._train_ds, self._validation_ds, self._test_ds
-
-    def build_pretraining_data_loader(
-        self, dataset, consumed_samples, dataset_type=None, drop_last=True, pad_samples_to_global_batch_size=False
-    ):
-        """Buld dataloader given an input dataset."""
-
-        logging.info(f'Building dataloader with consumed samples: {consumed_samples}')
-        # Megatron sampler
-        if hasattr(self.cfg.data, 'dataloader_type') and self.cfg.data.dataloader_type is not None:
-            if self.cfg.data.dataloader_type == 'single':
-                batch_sampler = MegatronPretrainingSampler(
-                    total_samples=len(dataset),
-                    consumed_samples=consumed_samples,
-                    micro_batch_size=self.cfg.micro_batch_size,
-                    data_parallel_rank=parallel_state.get_data_parallel_rank(),
-                    data_parallel_size=parallel_state.get_data_parallel_world_size(),
-                    drop_last=drop_last,
-                    global_batch_size=self.cfg.global_batch_size,
-                    rampup_batch_size=self.cfg.get('rampup_batch_size', None),
-                    pad_samples_to_global_batch_size=pad_samples_to_global_batch_size,
-                )
-            elif self.cfg.data.dataloader_type == 'cyclic':
-                batch_sampler = MegatronPretrainingRandomSampler(
-                    total_samples=len(dataset),
-                    consumed_samples=consumed_samples,
-                    micro_batch_size=self.cfg.micro_batch_size,
-                    data_parallel_rank=parallel_state.get_data_parallel_rank(),
-                    data_parallel_size=parallel_state.get_data_parallel_world_size(),
-                    drop_last=self.cfg.get('drop_last', True),
-                )
-            else:
-                raise ValueError('cfg.data.dataloader_type must be "single" or "cyclic"')
-        else:
-            raise ValueError('cfg.data.dataloader_type not found. Must be "single" or "cyclic"')
-
-        return torch.utils.data.DataLoader(
-            dataset,
-            batch_sampler=batch_sampler,
-            num_workers=self.cfg.data.num_workers,
-            pin_memory=True,
-            persistent_workers=True if self.cfg.data.num_workers > 0 else False,
-        )
-
     def setup(self, stage=None):
         """ PTL hook that is executed after DDP spawns.
             We setup datasets here as megatron datasets require DDP to instantiate.
@@ -1088,13 +971,6 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
 
         if stage == 'predict':
             return
-        else:
-            # TODO: consider adding a ModelPT guard to check if model is being restored.
-            # allowing restored models to optionally setup datasets
-            self.build_train_valid_test_datasets()
-            self.setup_training_data(self.cfg.data)
-            self.setup_validation_data(self.cfg.data)
-            self.setup_test_data(self.cfg.data)
 
         if stage == 'fit':
             if parallel_state.get_pipeline_model_parallel_world_size() > 1:
@@ -1113,42 +989,6 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
 
         if self.cfg.get('transformer_engine', False) or self.cfg.get('mcore_gpt', False):
             self.setup_transformer_engine_tp_groups()
-
-    def setup_training_data(self, cfg):
-        if hasattr(self, '_train_ds'):
-            consumed_samples = self.compute_consumed_samples(0)
-            logging.info(
-                f'Setting up train dataloader with len(len(self._train_ds)): {len(self._train_ds)} and consumed samples: {consumed_samples}'
-            )
-            self._train_dl = self.build_pretraining_data_loader(self._train_ds, consumed_samples)
-
-    def setup_validation_data(self, cfg):
-        if hasattr(self, '_validation_ds'):
-            consumed_samples = 0
-            logging.info(
-                f'Setting up validation dataloader with len(len(self._validation_ds)): {len(self._validation_ds)} and consumed samples: {consumed_samples}'
-            )
-
-            drop_last = True
-            if not self.cfg.data.get('validation_drop_last', True):
-                logging.info(f'Drop last in validation dataset is set to False')
-                drop_last = False
-            pad_samples_to_global_batch_size = False
-            if self.cfg.data.get('pad_samples_to_global_batch_size', False):
-                logging.info('pad_samples_to_global_batch_size set to True')
-                pad_samples_to_global_batch_size = True
-
-            self._validation_dl = self.build_pretraining_data_loader(
-                self._validation_ds, consumed_samples, "validation", drop_last, pad_samples_to_global_batch_size
-            )
-
-    def setup_test_data(self, cfg):
-        if hasattr(self, '_test_ds'):
-            consumed_samples = 0
-            logging.info(
-                f'Setting up test dataloader with len(len(self._test_ds)): {len(self._test_ds)} and consumed samples: {consumed_samples}'
-            )
-            self._test_dl = self.build_pretraining_data_loader(self._test_ds, consumed_samples)
 
     def generate(
         self,

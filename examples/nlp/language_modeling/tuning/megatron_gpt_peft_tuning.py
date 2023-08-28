@@ -50,7 +50,7 @@ def main(cfg) -> None:
     logging.info("\n\n************** Experiment configuration ***********")
     logging.info(f'\n{OmegaConf.to_yaml(cfg)}')
     
-    gpt_peft(cfg.model, cfg.trainer, cfg.exp_manager)
+    gpt_peft(cfg.model, cfg.model.data, cfg.trainer, cfg.exp_manager)
 
 
 if __name__ == '__main__':

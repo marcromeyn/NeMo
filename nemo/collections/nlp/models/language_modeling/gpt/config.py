@@ -1,7 +1,7 @@
 from typing import List, Optional
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 
-from omegaconf import OmegaConf
+from omegaconf import OmegaConf, DictConfig
 from nemo.collections.nlp.models.language_modeling.config.base import (
     ActivationCheckpointingConfig,
     AMPConfig,
@@ -13,49 +13,6 @@ from nemo.collections.nlp.models.language_modeling.config.base import (
 )
 
 
-@dataclass
-class GPTPretrainDatasetConfig(BaseConfig):
-    """
-    Configuration for the GPT pretraining dataset.
-
-    Attributes:
-        data_prefix (Union[List, str, dict]): Path to the data. Can be specified in various formats
-            like List, String, or Dictionary. For examples, please refer to the comments in the class.
-        index_mapping_dir (Optional[str]): Path to save index mapping .npy files. Default is the same location as data_prefix.
-        data_impl (str): Implementation type of the data. Default is "mmap".
-        splits_string (str): Split ratios for train, validation, and test data. Default is "900, 50, 50".
-        seq_length (str): Sequence length of the model's encoder. Default is "${model.encoder_seq_length}".
-        skip_warmup (bool): Whether to skip warmup. Default is True.
-        num_workers (int): Number of worker threads for data loading. Default is 2.
-        dataloader_type (str): Type of data loader. Options are "single" or "cyclic". Default is "single".
-        reset_position_ids (bool): Whether to reset position ids after end-of-document token. Default is False.
-        reset_attention_mask (bool): Whether to reset attention mask after end-of-document token. Default is False.
-        eod_mask_loss (bool): Whether to mask loss for the end-of-document tokens. Default is False.
-        validation_drop_last (bool): Whether to consume last partial validation samples. Set to False if you want to consume them. Default is True.
-        no_seqlen_plus_one_input_tokens (bool): Set to True to disable fetching (sequence length + 1) input tokens. Default is False.
-        pad_samples_to_global_batch_size (bool): Set to True to pad the last partial batch with -1's to equal global batch size. Default is False.
-        shuffle_documents (bool): Set to False to disable documents shuffling. Default is True.
-        exchange_indices_distributed (bool): Set to True to exchange indices via torch.distributed instead of filesystem. Default is False.
-    """
-
-    data_prefix: str
-    index_mapping_dir: Optional[str] = None
-    data_impl: str = "mmap"
-    splits_string: str = "900, 50, 50"
-    seq_length: str = "${model.encoder_seq_length}"
-    skip_warmup: bool = True
-    num_workers: int = 2
-    dataloader_type: str = "single"
-    reset_position_ids: bool = False
-    reset_attention_mask: bool = False
-    eod_mask_loss: bool = False
-    validation_drop_last: bool = True
-    no_seqlen_plus_one_input_tokens: bool = False
-    pad_samples_to_global_batch_size: bool = False
-    shuffle_documents: bool = True
-    exchange_indices_distributed: bool = False
-
-    
 @dataclass
 class ParallelismConfig(BaseConfig):
     """Configuration for parallelism including micro and global batch sizes, and model parallelism.
@@ -214,7 +171,7 @@ class GPTConfig(BaseConfig):
             `virtual_pipeline_model_parallel_size` is larger than 1. Default is True.
     """
     
-    data: GPTPretrainDatasetConfig
+    # data: GPTPretrainDatasetConfig
     tokenizer: GPTTokenizerConfig = GPTTokenizerConfig()
     nsys_profile: NSysProfilingConfig = NSysProfilingConfig()
     optim: OptimizationConfig = OptimizationConfig()
@@ -264,6 +221,11 @@ class GPTConfig(BaseConfig):
     num_query_groups: Optional[int] = None
     use_flash_attention: bool = False
     
+    # From sft
+    restore_from_path: Optional[str] = None
+    save_nemo_on_validation_end: bool = False
+    answer_only_loss: bool = False
+    
     @classmethod
     def from_flattened_cfg(cls, cfg: OmegaConf) -> "GPTConfig":
         """
@@ -276,13 +238,13 @@ class GPTConfig(BaseConfig):
             GPTConfig: The constructed dataclass.
         """
         # Create a copy of the cfg to avoid modifying the original
-        cfg_dict = OmegaConf.to_container(cfg)
+        cfg_dict = OmegaConf.to_container(cfg, resolve=True)
 
         # Handle special v1 flattened attributes
         v1_config_objects = {
             name: class_name() for name, class_name in _V1_FLATTENED_CONFIGS.items()
         }
-        _to_remove = []
+        _to_remove = ["data"]
         for key, value in cfg_dict.items():
             attr_class = _V1_ATTRIBUTES.get(key)
             if attr_class:
@@ -290,19 +252,20 @@ class GPTConfig(BaseConfig):
                 _to_remove.append(key)
                 
         for key in _to_remove:
-            del cfg_dict[key]
+            if key in cfg_dict:
+                del cfg_dict[key]
 
         # Extract other attributes, providing defaults if not found
-        data = GPTPretrainDatasetConfig(**cfg_dict.pop("data", {}))
+        # data = GPTPretrainDatasetConfig(**cfg_dict.pop("data", {}))
         tokenizer = GPTTokenizerConfig(**cfg_dict.pop("tokenizer", {}))
         nsys_profile = NSysProfilingConfig(**cfg_dict.pop("nsys_profile", {}))
         optim = OptimizationConfig(**cfg_dict.pop("optim", {}))
         
-        del cfg_dict["max_position_embeddings"]
+        cfg_dict.pop("max_position_embeddings", None)
 
         # Un-pack the remaining attributes to instantiate the GPTConfig class
         return cls(
-            data=data, 
+            # data=data, 
             tokenizer=tokenizer, 
             nsys_profile=nsys_profile, 
             optim=optim,
@@ -310,12 +273,26 @@ class GPTConfig(BaseConfig):
             **cfg_dict
         )
         
-    def __post_init__(self):
-        self.data.seq_length = str(self.encoder_seq_length)
+    # def __post_init__(self):
+    #     self.data.seq_length = str(self.encoder_seq_length)
     
     @property
     def max_position_embeddings(self) -> int:
         return self.encoder_seq_length
+    
+    def to_cfg(self, precision=None) -> DictConfig:
+        output_dict = asdict(self)
+        output_dict["max_position_embeddings"] = self.max_position_embeddings
+        
+        for key in _V1_FLATTENED_CONFIGS:
+            del output_dict[key]
+            for nested_key, val in asdict(getattr(self, key)).items():
+                output_dict[nested_key] = val
+                
+        if precision:
+            output_dict["precision"] = precision
+            
+        return OmegaConf.create(output_dict)
     
     def __getattr__(self, name: str):
         """

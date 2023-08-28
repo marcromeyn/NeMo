@@ -14,13 +14,10 @@
 
 
 import torch.multiprocessing as mp
-from omegaconf.omegaconf import OmegaConf, open_dict
+from omegaconf.omegaconf import OmegaConf
 
-from nemo.collections.nlp.models.language_modeling.megatron_gpt_model import MegatronGPTModel
-from nemo.collections.nlp.parts.megatron_trainer_builder import MegatronTrainerBuilder
 from nemo.core.config import hydra_runner
 from nemo.utils import logging
-from nemo.utils.exp_manager import exp_manager
 from nemo.collections.nlp.models.language_modeling.gpt import gpt_pre_training
 
 mp.set_start_method("spawn", force=True)
@@ -31,18 +28,7 @@ def main(cfg) -> None:
     logging.info("\n\n************** Experiment configuration ***********")
     logging.info(f'\n{OmegaConf.to_yaml(cfg)}')
     
-    gpt_pre_training(cfg.model, cfg.trainer, cfg.exp_manager)
-
-    trainer = MegatronTrainerBuilder(cfg).create_trainer()
-    exp_manager(trainer, cfg.exp_manager)
-
-    # hydra interpolation does not work here as the interpolation key is lost when PTL saves hparams
-    with open_dict(cfg):
-        cfg.model.precision = cfg.trainer.precision
-
-    model = MegatronGPTModel(cfg.model, trainer)
-
-    trainer.fit(model)
+    gpt_pre_training(cfg.model, cfg.model.data, cfg.trainer, cfg.exp_manager)
 
 
 if __name__ == '__main__':
