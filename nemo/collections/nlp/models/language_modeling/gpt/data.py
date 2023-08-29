@@ -2,7 +2,7 @@ from typing import List, Optional
 from dataclasses import dataclass, field
 import torch
 import pytorch_lightning as pl
-from omegaconf import OmegaConf, open_dict, ListConfig
+from omegaconf import OmegaConf, open_dict
 
 from nemo.collections.nlp.models.language_modeling.config.base import (
     BaseConfig,
@@ -23,6 +23,7 @@ from nemo.collections.nlp.data.language_modeling.megatron.gpt_sft_dataset import
 from nemo.utils import logging
 from nemo.collections.nlp.data.language_modeling.megatron.gpt_dataset import build_train_valid_test_datasets
 from megatron.core import parallel_state
+from nemo.collections.nlp.models.language_modeling.gpt.config import GPTConfig
 
 
 @dataclass
@@ -72,7 +73,7 @@ class GPTPreTrainingDataset(pl.LightningDataModule):
     def __init__(
         self, 
         config: GPTPretrainDatasetConfig,
-        model_config,
+        model_config: GPTConfig,
     ):
         super(GPTPreTrainingDataset, self).__init__()
         self.config = config
@@ -83,8 +84,7 @@ class GPTPreTrainingDataset(pl.LightningDataModule):
         pass
     
     def setup(self, stage=None):
-        self._train_ds, self._validation_ds, self._test_ds = self.build_train_valid_test_datasets()
-        # Move other logic here if needed
+        self.build_train_valid_test_datasets()
 
     def build_train_valid_test_datasets(self):
         logging.info('Building GPT datasets.')
@@ -130,8 +130,6 @@ class GPTPreTrainingDataset(pl.LightningDataModule):
             logging.info(f'Length of test dataset: {len(self._test_ds)}')
         logging.info(f'Finished building GPT datasets.')
 
-        return self._train_ds, self._validation_ds, self._test_ds
-
     def build_pretraining_data_loader(self, dataset, consumed_samples, dataset_type=None, drop_last=True, pad_samples_to_global_batch_size=False):
         logging.info(f'Building dataloader with consumed samples: {consumed_samples}')
         # Megatron sampler
@@ -140,22 +138,22 @@ class GPTPreTrainingDataset(pl.LightningDataModule):
                 batch_sampler = MegatronPretrainingSampler(
                     total_samples=len(dataset),
                     consumed_samples=consumed_samples,
-                    micro_batch_size=self.cfg.micro_batch_size,
+                    micro_batch_size=self.model_config.micro_batch_size,
                     data_parallel_rank=parallel_state.get_data_parallel_rank(),
                     data_parallel_size=parallel_state.get_data_parallel_world_size(),
                     drop_last=drop_last,
-                    global_batch_size=self.cfg.global_batch_size,
-                    rampup_batch_size=self.cfg.get('rampup_batch_size', None),
+                    global_batch_size=self.model_config.global_batch_size,
+                    rampup_batch_size=self.model_config.get('rampup_batch_size', None),
                     pad_samples_to_global_batch_size=pad_samples_to_global_batch_size,
                 )
             elif self.cfg.data.dataloader_type == 'cyclic':
                 batch_sampler = MegatronPretrainingRandomSampler(
                     total_samples=len(dataset),
                     consumed_samples=consumed_samples,
-                    micro_batch_size=self.cfg.micro_batch_size,
+                    micro_batch_size=self.model_config.micro_batch_size,
                     data_parallel_rank=parallel_state.get_data_parallel_rank(),
                     data_parallel_size=parallel_state.get_data_parallel_world_size(),
-                    drop_last=self.cfg.get('drop_last', True),
+                    drop_last=self.model_config.get('drop_last', True),
                 )
             else:
                 raise ValueError('cfg.data.dataloader_type must be "single" or "cyclic"')
@@ -165,10 +163,11 @@ class GPTPreTrainingDataset(pl.LightningDataModule):
         return torch.utils.data.DataLoader(
             dataset,
             batch_sampler=batch_sampler,
-            num_workers=self.config.num_workers,
+            num_workers=self.model_config.num_workers,
             pin_memory=True,
-            persistent_workers=True if self.config.num_workers > 0 else False,
+            persistent_workers=True if self.model_config.num_workers > 0 else False,
         )
+    
     def train_dataloader(self):
         # The existing code to create a train DataLoader using self._train_ds
         consumed_samples = self.trainer.model.compute_consumed_samples(0)
@@ -186,7 +185,7 @@ class GPTPreTrainingDataset(pl.LightningDataModule):
 
 
 @dataclass
-class MetricConfig:
+class MetricConfig(BaseConfig):
     """Configuration for metrics during training, validation, and testing."""
     name: str
     average: Optional[str] = None
@@ -194,7 +193,7 @@ class MetricConfig:
 
 
 @dataclass
-class GPTFineTuneDatasetConfig:
+class DatasetConfig(BaseConfig):
     """
     Dataclass for holding dataset configuration.
 
@@ -229,11 +228,12 @@ class GPTFineTuneDatasetConfig:
     micro_batch_size: int
     shuffle: bool
     num_workers: int
-    memmap_workers: int
-    pin_memory: bool
-    max_seq_length: int
-    min_seq_length: int
-    drop_last: bool
+    
+    memmap_workers: Optional[int] = None
+    pin_memory: bool = True
+    max_seq_length: int = 1
+    min_seq_length: int = 2048
+    drop_last: bool = False
     concat_sampling_probabilities: Optional[List[float]] = None
     context_key: str = 'input'
     label_key: str = 'output'
@@ -246,46 +246,77 @@ class GPTFineTuneDatasetConfig:
     prompt_template: str = "{input} {output}"
     write_predictions_to_file: bool = False
     output_file_path_prefix: Optional[str] = None
-    tokens_to_generate: Optional[int] = None
+    tokens_to_generate: int = 0
     metric: MetricConfig = field(default_factory=lambda: MetricConfig(name="loss"))
-
+    names: List[str] = field(default_factory=list)
+    hf_dataset: bool = False
+    
+    def __post_init__(self):
+        if isinstance(self.metric, dict):
+            self.metric = MetricConfig(**self.metric)
+    
+    
+@dataclass
+class GPTFineTuneDatasetConfig(BaseConfig):
+    train_ds: Optional[DatasetConfig] = None
+    validation_ds: Optional[DatasetConfig] = None
+    test_ds: Optional[DatasetConfig] = None
+    chat: bool = False
+    
+    @classmethod
+    def from_cfg(cls, cfg) -> "GPTFineTuneDatasetConfig":
+        cfg_dict = OmegaConf.to_container(cfg, resolve=True)
+        
+        train_ds = cfg_dict.pop("train_ds", None)
+        validation_ds = cfg_dict.pop("validation_ds", None)
+        test_ds = cfg_dict.pop("test_ds", None)
+        
+        return GPTFineTuneDatasetConfig(
+            train_ds=DatasetConfig(**train_ds) if train_ds else None,
+            validation_ds=DatasetConfig(**validation_ds) if validation_ds else None,
+            test_ds=DatasetConfig(**test_ds) if test_ds else None,
+            **cfg_dict
+        )
 
 
 class GPTFineTuneDataset(pl.LightningDataModule):
     def __init__(
         self, 
-        train_ds: GPTFineTuneDatasetConfig,
-        validation_ds: GPTFineTuneDatasetConfig,
-        test_ds: GPTFineTuneDatasetConfig
+        config: GPTFineTuneDatasetConfig,
+        model_config: GPTConfig,
     ):
-        self.train_config = train_ds
-        self.val_config = validation_ds
-        self.test_config = test_ds
+        super(GPTFineTuneDataset, self).__init__()
+        self.model_config = model_config
+        self.config = config
         
+    def prepare_data(self):
+        # This method is intended for tasks like downloading data, etc.
+        pass
+    
     def setup(self, stage=None):
-        self._train_ds, self._validation_ds, self._test_ds = self.build_train_valid_test_datasets(stage)
+        self.build_train_valid_test_datasets(stage)
 
     def build_train_valid_test_datasets(self, stage):
         if stage != 'test':
             logging.info('Building GPT SFT validation datasets.')
             # Wrap this in a list since the general finetuning parent class supports multi-validation.
-            self._validation_ds = self._build_dataset(self.val_config, is_train=False)
+            self._validation_ds = self._build_dataset(self.config.validation_ds, is_train=False)
             logging.info(f'Length of val dataset: {len(self._validation_ds[0])}')
 
         if stage != 'validate':
-            if hasattr(self.cfg.data, 'test_ds'):
+            if self.config.test_ds is not None:
                 logging.info('Building GPT SFT test datasets.')
                 # Wrap this in a list since the general finetuning parent class supports multi-validation.
-                self._test_ds = self._build_dataset(self.test_config, is_train=False)
+                self._test_ds = self._build_dataset(self.config.test_ds, is_train=False)
                 logging.info(f'Length of test dataset: {len(self._test_ds[0])}')
 
         if stage == 'validate' or stage == 'test':
             return
         logging.info('Building GPT SFT traing datasets.')
-        self._train_ds = self._build_dataset(self.test_config)
+        self._train_ds = self._build_dataset(self.config.train_ds)
         logging.info(f'Length of train dataset: {len(self._train_ds)}')
 
-    def build_data_loader(self, dataset, data_cfg, consumed_samples=0):
+    def build_data_loader(self, dataset, data_cfg: DatasetConfig, consumed_samples=0):
         """Buld dataloader given an input dataset."""
 
         logging.info(f'Building dataloader with consumed samples: {consumed_samples}')
@@ -313,33 +344,36 @@ class GPTFineTuneDataset(pl.LightningDataModule):
         )
 
     def train_dataloader(self):
-        consumed_samples = self.compute_consumed_samples(0)
+        consumed_samples = self.trainer.model.module._forward_module.compute_consumed_samples(0)
         return self.build_data_loader(
             dataset=self._train_ds, 
-            data_cfg=self.cfg.data.train_ds, 
+            data_cfg=self.config.train_ds, 
             consumed_samples=consumed_samples,
         )
 
-    def val_dataloader(self, datasets, data_cfg):
+    def val_dataloader(self):
         dataloaders = []
-        for dataset in datasets:
-            eval_dl = self.build_data_loader(dataset=dataset, data_cfg=data_cfg, consumed_samples=0,)
+        for dataset in self._validation_ds:
+            eval_dl = self.build_data_loader(
+                dataset=dataset, 
+                data_cfg=self.config.validation_ds, 
+                consumed_samples=0,
+            )
             dataloaders.append(eval_dl)
         
         return dataloaders
     
-    def _build_dataset(self, data_cfg, is_train=True):
+    def _build_dataset(self, data_cfg: DatasetConfig, is_train=True):
         datasets = []
         # Determine if we are using a single dataset or a list of datasets.
-        is_list_config = isinstance(data_cfg.file_names, ListConfig)
-        if not is_list_config:
+        if not isinstance(data_cfg.file_names, list):
             raise ValueError(f"SFT train/validation datasets must be provided as a list of individual JSONL files.")
 
         if is_train:
             # Construct the data prefix list for `get_datasets_weights_and_num_samples()`
             # that is of the format [weight1,file_name1,weight2,file_name2,...]
             if data_cfg.concat_sampling_probabilities is None or not isinstance(
-                data_cfg.concat_sampling_probabilities, ListConfig
+                data_cfg.concat_sampling_probabilities, list
             ):
                 raise ValueError(
                     (
@@ -373,50 +407,48 @@ class GPTFineTuneDataset(pl.LightningDataModule):
 
         # Check dataset max_seq_legnth and max_position_embeddings size
         if (
-            self.cfg.get('position_embedding_type', None) in [None, 'learned_absolute']
-            and data_cfg.max_seq_length > self.cfg.max_position_embeddings
+            self.model_config.position_embedding_type in [None, 'learned_absolute']
+            and data_cfg.max_seq_length > self.model_config.max_position_embeddings
         ):
             logging.warning(
-                f"Set dataset max_seq_length to max_position_embeddings {self.cfg.max_position_embeddings} if using learned_absolute position embedding"
+                f"Set dataset max_seq_length to max_position_embeddings {self.model_config.max_position_embeddings} if using learned_absolute position embedding"
             )
-            data_cfg.max_seq_length = self.cfg.max_position_embeddings
+            data_cfg.max_seq_length = self.model_config.max_position_embeddings
 
         for file_path, num_samples in zip(data_cfg.file_names, num_train_samples_per_dataset):
-            if self.cfg.data.get("chat", False):
+            if self.config.chat:
                 dataset_cls = GPTSFTChatDataset
             else:
                 dataset_cls = GPTSFTDataset
             dataset = dataset_cls(
                 file_path=file_path,
-                tokenizer=self.tokenizer,
+                tokenizer=self.trainer.model.tokenizer,
                 max_seq_length=data_cfg.max_seq_length,
                 min_seq_length=data_cfg.min_seq_length,
-                add_bos=data_cfg.get('add_bos', False),
-                add_eos=data_cfg.get('add_eos', True),
-                add_sep=data_cfg.get('add_sep', False),
-                sep_id=self.sep_id,
+                add_bos=data_cfg.add_bos,
+                add_eos=data_cfg.add_eos,
+                add_sep=data_cfg.add_sep,
+                sep_id=getattr(self.trainer.model, "sep_id", 49704),
                 max_num_samples=num_samples[0],
-                seed=data_cfg.get('seed', 1234),
+                seed=self.model_config.seed,
                 context_key=data_cfg.get('context_key', 'text'),
                 label_key=data_cfg.get('label_key', 'answer'),
                 separate_prompt_and_response_with_newline=data_cfg.get(
                     'separate_prompt_and_response_with_newline', True
                 ),
-                answer_only_loss=self.cfg.get('answer_only_loss', True),
+                answer_only_loss=self.model_config.answer_only_loss,
                 truncation_field=data_cfg.get('truncation_field', 'context'),
                 pad_to_max_length=data_cfg.get('pad_to_max_length', False),
                 index_mapping_dir=data_cfg.get('index_mapping_dir', None),
                 prompt_template=data_cfg.get('prompt_template', None),
-                virtual_tokens=self.virtual_tokens,
+                virtual_tokens=getattr(self.trainer.model, "virtual_tokens", 0),
                 tokens_to_generate=data_cfg.get(
                     'tokens_to_generate', 0
                 ),  # used at inference time to allocate tensor positions for tokens that will be generated by inf procedure.
-                memmap_workers=data_cfg.get(
-                    'memmap_workers', None
-                ),  # used to set num. of workers to create the memmap index files
-                hf_dataset=data_cfg.get(
-                    'hf_dataset', False
-                ),  # Whether to load the json file with the HuggingFace dataset. otherwise, will load the jsonl file with the JSONLMemMapDataset.
+                memmap_workers=data_cfg.memmap_workers
+                ,  # used to set num. of workers to create the memmap index files
+                hf_dataset=data_cfg.hf_dataset
+                ,  # Whether to load the json file with the HuggingFace dataset. otherwise, will load the jsonl file with the JSONLMemMapDataset.
             )
             datasets.append(dataset)
 

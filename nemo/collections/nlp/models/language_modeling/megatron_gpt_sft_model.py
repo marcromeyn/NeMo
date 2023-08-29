@@ -169,6 +169,17 @@ class MegatronGPTSFTModel(MegatronGPTModel):
         else:
             init_consumed_samples = 0
         self.init_consumed_samples = init_consumed_samples
+        
+        if hasattr(self.cfg, "data"):
+            self._train_ds = self.cfg.data.train_ds
+            self._validation_ds = self.cfg.data.validation_ds
+            self._test_ds = self.cfg.data.test_ds
+        elif hasattr(self.trainer, "datamodule"):
+            self._train_ds = self.trainer.datamodule.config.train_ds
+            self._validation_ds = self.trainer.datamodule.config.validation_ds
+            self._test_ds = self.trainer.datamodule.config.test_ds
+        else:
+            raise ValueError("Can't infer datasets")
 
         if stage == 'predict':
             return
@@ -176,20 +187,20 @@ class MegatronGPTSFTModel(MegatronGPTModel):
         # If the user wants to manually override train and validation dataloaders before calling `.fit()`
         if self._train_dl is not None and self._validation_dl is not None:
             return
-        self.build_train_valid_test_datasets(stage=stage)
-        if hasattr(self, '_train_ds'):
-            self.setup_training_dataloader()
-        if hasattr(self, '_validation_ds'):
-            self._validation_dl = self.setup_eval_dataloader(self._validation_ds, self.cfg.data.validation_ds)
-        if hasattr(self.cfg.data, 'test_ds'):
-            self._test_dl = self.setup_eval_dataloader(self._test_ds, self.cfg.data.test_ds)
+        # self.build_train_valid_test_datasets(stage=stage)
+        # if hasattr(self, '_train_ds'):
+        #     self.setup_training_dataloader()
+        # if hasattr(self, '_validation_ds'):
+        #     self._validation_dl = self.setup_eval_dataloader(self._validation_ds, self.cfg.data.validation_ds)
+        # if hasattr(self.cfg.data, 'test_ds'):
+        #     self._test_dl = self.setup_eval_dataloader(self._test_ds, self.cfg.data.test_ds)
 
-        # Raise error if using multiple dataloaders
-        if type(self._validation_dl) == list and len(self._validation_dl) > 1:
-            raise NotImplementedError('Lightning 2.0 does not support multiple dataloaders with dataloader_iter')
+        # # Raise error if using multiple dataloaders
+        # if type(self._validation_dl) == list and len(self._validation_dl) > 1:
+        #     raise NotImplementedError('Lightning 2.0 does not support multiple dataloaders with dataloader_iter')
 
-        if type(self._test_dl) == list and len(self._test_dl) > 1:
-            raise NotImplementedError('Lightning 2.0 does not support multiple dataloaders with dataloader_iter')
+        # if type(self._test_dl) == list and len(self._test_dl) > 1:
+        #     raise NotImplementedError('Lightning 2.0 does not support multiple dataloaders with dataloader_iter')
 
         # when using pipeline model parallel the final stage need to initialize word embeddings
         if parallel_state.get_pipeline_model_parallel_world_size() > 1:
@@ -391,7 +402,7 @@ class MegatronGPTSFTModel(MegatronGPTModel):
 
     def inference_step(self, dataloader_iter, batch_idx, mode, dataloader_idx=0):
         batch = next(dataloader_iter)
-        data_cfg = self.cfg.data.validation_ds if mode == 'validation' else self.cfg.data.test_ds
+        data_cfg = self._validation_ds if mode == 'validation' else self._test_ds
         self._reconfigure_and_process_inference_batch(batch, data_cfg)
         # Meta data from dataset
         metadata = batch.get('metadata', [{}] * len(batch['tokens']))
@@ -424,6 +435,9 @@ class MegatronGPTSFTModel(MegatronGPTModel):
         }
 
         if mode == 'validation':
+            if not self.validation_step_outputs:
+                return outputs
+            
             if type(self.trainer.val_dataloaders) == list and len(self.trainer.val_dataloaders) > 1:
                 # super().validation_step appends just loss to self.validation_step_outputs, replace the last appended loss with the outputs dict
                 self.validation_step_outputs[dataloader_idx][-1] = outputs
@@ -431,6 +445,9 @@ class MegatronGPTSFTModel(MegatronGPTModel):
                 # super().validation_step appends just loss to self.validation_step_outputs, replace the last appended loss with the outputs dict
                 self.validation_step_outputs[-1] = outputs
         else:
+            if not self.test_step_outputs:
+                return outputs
+            
             if type(self.trainer.test_dataloaders) == list and len(self.trainer.test_dataloaders) > 1:
                 self.test_step_outputs[dataloader_idx][-1] = outputs
             else:
@@ -809,8 +826,8 @@ class MegatronGPTSFTModel(MegatronGPTModel):
         _reconfigure_microbatch_calculator(
             rank=app_state.global_rank,
             rampup_batch_size=None,
-            global_batch_size=self.cfg.data.validation_ds.global_batch_size,
-            micro_batch_size=self.cfg.data.validation_ds.micro_batch_size,
+            global_batch_size=self._validation_ds.global_batch_size,
+            micro_batch_size=self._validation_ds.micro_batch_size,
             data_parallel_size=parallel_state.get_data_parallel_world_size(),
         )
         return super().on_validation_epoch_start()
@@ -822,19 +839,19 @@ class MegatronGPTSFTModel(MegatronGPTModel):
         _reconfigure_microbatch_calculator(
             rank=app_state.global_rank,
             rampup_batch_size=None,
-            global_batch_size=self.cfg.data.test_ds.global_batch_size,
-            micro_batch_size=self.cfg.data.test_ds.micro_batch_size,
+            global_batch_size=self._test_ds.global_batch_size,
+            micro_batch_size=self._test_ds.micro_batch_size,
             data_parallel_size=parallel_state.get_data_parallel_world_size(),
         )
         return super().on_test_epoch_start()
 
     def on_test_epoch_end(self):
-        _ = self.inference_epoch_end(self.test_step_outputs, 'test', self.cfg.data.test_ds)
+        _ = self.inference_epoch_end(self.test_step_outputs, 'test', self._test_ds)
         # Commenting as on_test_epoch_end was a no-op in PTL 1.9
         # return super().on_test_epoch_end()
 
     def on_validation_epoch_end(self):
-        _ = self.inference_epoch_end(self.validation_step_outputs, 'validation', self.cfg.data.validation_ds)
+        _ = self.inference_epoch_end(self.validation_step_outputs, 'validation', self._validation_ds)
         # Commenting as on_validation_epoch_end was a no-op in PTL 1.9
         # return super().on_validation_epoch_end()
 

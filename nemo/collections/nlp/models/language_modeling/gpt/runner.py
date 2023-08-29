@@ -7,7 +7,9 @@ from pytorch_lightning.plugins.environments import TorchElasticEnvironment
 from nemo.collections.nlp.models.language_modeling.gpt.config import GPTConfig
 from nemo.collections.nlp.models.language_modeling.gpt.data import (
     GPTPretrainDatasetConfig,
-    GPTPreTrainingDataset
+    GPTPreTrainingDataset,
+    GPTFineTuneDataset,
+    GPTFineTuneDatasetConfig
 )
 from nemo.collections.nlp.parts.nlp_overrides import (
     GradScaler,
@@ -18,6 +20,7 @@ from nemo.collections.nlp.parts.nlp_overrides import (
     PEFTSaveRestoreConnector,
 )
 from nemo.utils.exp_manager import exp_manager as exp_manager_fn
+from nemo.collections.nlp.models.language_modeling.megatron_gpt_model import MegatronGPTModel
 
 
 def gpt_pre_training(
@@ -26,25 +29,10 @@ def gpt_pre_training(
     trainer: Union[DictConfig, Trainer],
     exp_manager: DictConfig # TODO: Turn this into config-class
 ):
-    from nemo.collections.nlp.models.language_modeling.megatron_gpt_model import MegatronGPTModel
-    
-    if isinstance(config, DictConfig):
-        gpt_config = GPTConfig.from_flattened_cfg(config)
-    elif isinstance(config, GPTConfig):
-        gpt_config = config
-    else:
-        raise ValueError(f"Please provide a DictConfig or GPTConfig, got: {config}")
-    
-    if isinstance(trainer, DictConfig):
-        trainer = Trainer(
-            plugins=default_trainer_plugins(gpt_config, trainer.precision), 
-            strategy=default_trainer_strategy(gpt_config), 
-            **trainer
-        )
-        
-    exp_manager_fn(trainer, exp_manager)
+    gpt_config: GPTConfig = _parse_gpt_config(config)
+    trainer: Trainer = _parse_trainer(trainer, gpt_config, exp_manager)
     model = MegatronGPTModel(gpt_config, trainer)
-    
+
     if isinstance(data, DictConfig):
         data = GPTPretrainDatasetConfig(**data)
     if isinstance(data, GPTPretrainDatasetConfig):
@@ -58,67 +46,22 @@ def gpt_pre_training(
 def gpt_peft(
     config: Union[DictConfig, GPTConfig],
     peft_config: DictConfig, # TODO: Turn into config-class
-    data,
+    data: Union[DictConfig, GPTFineTuneDataset, LightningDataModule],
     trainer: Union[DictConfig, Trainer],
     exp_manager: DictConfig # TODO: Turn this into config-class
 ):
-    from nemo.collections.nlp.models.language_modeling.megatron_gpt_model import MegatronGPTModel
+    gpt_config: GPTConfig = _parse_gpt_config(config, to_remove=["peft", "data"])
+    trainer: Trainer = _parse_trainer(trainer, gpt_config, exp_manager)
+    model = restore_peft_model(gpt_config, peft_config, data, trainer)
+    if isinstance(data, DictConfig):
+        data = GPTFineTuneDatasetConfig.from_cfg(data)
+    if isinstance(data, GPTFineTuneDatasetConfig):
+        data = GPTFineTuneDataset(data, gpt_config)
     
-    if isinstance(config, DictConfig):
-        with open_dict(config):
-            del config.peft
-            del config.data
-        
-        gpt_config = GPTConfig.from_flattened_cfg(config)        
-    elif isinstance(config, GPTConfig):
-        gpt_config = config
-    else:
-        raise ValueError(f"Please provide a DictConfig or GPTConfig, got: {config}")
-    
-    if isinstance(trainer, DictConfig):
-        trainer = Trainer(
-            plugins=default_trainer_plugins(gpt_config, trainer.precision), 
-            strategy=default_trainer_strategy(gpt_config), 
-            **trainer
-        )
-        
-    exp_manager_fn(trainer, exp_manager)
-    
-    cfg = gpt_config.to_cfg(trainer.precision)
-    
-    if not gpt_config.restore_from_path:
-        raise RuntimeError("PEFT training needs a trained base model present.")
-    
-    if gpt_config.resume_from_checkpoint is not None:
-        trainer.ckpt_path = gpt_config.resume_from_checkpoint
-        
-    base_model_save_restore_connector = NLPSaveRestoreConnector()
-    if os.path.isdir(gpt_config.restore_from_path):
-        base_model_save_restore_connector.model_extracted_dir = gpt_config.restore_from_path
-    base_model_cfg = MegatronGPTModel.restore_from(
-        restore_path=gpt_config.restore_from_path,
-        trainer=trainer,
-        return_config=True,
-        save_restore_connector=base_model_save_restore_connector,
-    )
-    base_model_cfg = _modify_config(base_model_cfg, cfg, peft_config, data, add_cfg_to_tree=False)
-    save_restore_connector = PEFTSaveRestoreConnector(
-        peft_model_nemo_path=peft_config.restore_from_path, peft_model_ckpt_path=trainer.ckpt_path
-    )
-    if os.path.isdir(cfg.restore_from_path):
-        save_restore_connector.model_extracted_dir = cfg.restore_from_path
-    peft_cls = _get_peft_scheme(peft_config)
-    model = peft_cls.restore_from(
-        restore_path=cfg.restore_from_path,
-        trainer=trainer,
-        override_config_path=base_model_cfg,
-        save_restore_connector=save_restore_connector,
-    )
-    
-    trainer.fit(model)
+    trainer.fit(model, data)
     
     return model
-        
+
         
 def default_trainer_strategy(config: GPTConfig) -> NLPDDPStrategy:
     # Replace with your desired logic for GPT
@@ -156,6 +99,72 @@ def default_trainer_plugins(config: GPTConfig, precision: Union[str, int]) -> li
 
     return plugins
 
+
+def restore_peft_model(gpt_config: GPTConfig, peft_config, data, trainer: Trainer):
+    if not gpt_config.restore_from_path:
+        raise RuntimeError("PEFT training needs a trained base model present.")
+    
+    if gpt_config.resume_from_checkpoint is not None:
+        trainer.ckpt_path = gpt_config.resume_from_checkpoint
+    
+    cfg = gpt_config.to_cfg(trainer.precision)
+    
+    base_model_save_restore_connector = NLPSaveRestoreConnector()
+    if os.path.isdir(gpt_config.restore_from_path):
+        base_model_save_restore_connector.model_extracted_dir = gpt_config.restore_from_path
+    base_model_cfg = MegatronGPTModel.restore_from(
+        restore_path=gpt_config.restore_from_path,
+        trainer=trainer,
+        return_config=True,
+        save_restore_connector=base_model_save_restore_connector,
+    )
+    base_model_cfg = _modify_config(base_model_cfg, cfg, peft_config, data, add_cfg_to_tree=False)
+    save_restore_connector = PEFTSaveRestoreConnector(
+        peft_model_nemo_path=peft_config.restore_from_path, peft_model_ckpt_path=trainer.ckpt_path
+    )
+    if os.path.isdir(cfg.restore_from_path):
+        save_restore_connector.model_extracted_dir = cfg.restore_from_path
+    peft_cls = _get_peft_scheme(peft_config)
+    model = peft_cls.restore_from(
+        restore_path=cfg.restore_from_path,
+        trainer=trainer,
+        override_config_path=base_model_cfg,
+        save_restore_connector=save_restore_connector,
+    )
+    
+    return model
+
+
+def _parse_gpt_config(config, to_remove=None) -> GPTConfig:
+    if isinstance(config, DictConfig):
+        if to_remove:
+            with open_dict(config):
+                for key in to_remove:
+                    config.pop(key, None)
+        
+        gpt_config = GPTConfig.from_flattened_cfg(config)        
+    elif isinstance(config, GPTConfig):
+        gpt_config = config
+    else:
+        raise ValueError(f"Please provide a DictConfig or GPTConfig, got: {config}")
+    
+    return gpt_config
+
+
+def _parse_trainer(trainer, gpt_config, exp_manager=None) -> Trainer:
+    if isinstance(trainer, DictConfig):
+        trainer = Trainer(
+            plugins=default_trainer_plugins(gpt_config, trainer.precision), 
+            strategy=default_trainer_strategy(gpt_config), 
+            **trainer
+        )
+    if not isinstance(trainer, Trainer):
+        raise ValueError(f"Please provide a DictConfig or Trainer, got: {trainer}")
+    
+    if exp_manager:
+        exp_manager_fn(trainer, exp_manager)
+        
+    return trainer
 
 
 def _get_peft_scheme(cfg):

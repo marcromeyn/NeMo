@@ -171,7 +171,6 @@ class GPTConfig(BaseConfig):
             `virtual_pipeline_model_parallel_size` is larger than 1. Default is True.
     """
     
-    # data: GPTPretrainDatasetConfig
     tokenizer: GPTTokenizerConfig = GPTTokenizerConfig()
     nsys_profile: NSysProfilingConfig = NSysProfilingConfig()
     optim: OptimizationConfig = OptimizationConfig()
@@ -271,7 +270,6 @@ class GPTConfig(BaseConfig):
 
         # Un-pack the remaining attributes to instantiate the GPTConfig class
         return cls(
-            # data=data, 
             tokenizer=tokenizer, 
             nsys_profile=nsys_profile, 
             optim=optim,
@@ -279,9 +277,6 @@ class GPTConfig(BaseConfig):
             **cfg_dict
         )
         
-    # def __post_init__(self):
-    #     self.data.seq_length = str(self.encoder_seq_length)
-    
     @property
     def max_position_embeddings(self) -> int:
         return self.encoder_seq_length

@@ -12,13 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from __future__ import annotations
 import itertools
 import inspect
 import queue
 import warnings
 from dataclasses import fields
 from functools import partial
-from typing import Any, Dict, Iterator, List, Optional, Union
+from typing import Any, Dict, Iterator, List, Optional, Union, TYPE_CHECKING
 
 import torch
 from omegaconf import OmegaConf
@@ -60,7 +61,6 @@ from nemo.core.classes import Exportable
 from nemo.core.classes.common import PretrainedModelInfo
 from nemo.core.neural_types import ChannelType, NeuralType
 from nemo.utils import logging
-from nemo.collections.nlp.models.language_modeling.gpt.config import GPTConfig
 
 try:
     import apex.transformer.pipeline_parallel.utils
@@ -99,7 +99,10 @@ try:
 
 except (ImportError, ModuleNotFoundError):
     HAVE_TE = False
-
+    
+if TYPE_CHECKING:
+    from nemo.collections.nlp.models.language_modeling.gpt.config import GPTConfig
+    
 
 class MegatronGPTExportableModel(torch.nn.Module, Exportable):
     """
@@ -211,6 +214,8 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
             )
         # this prevents base constructor from initializing tokenizer
         self.tokenizer = None
+        
+        from nemo.collections.nlp.models.language_modeling.gpt.config import GPTConfig
         
         if isinstance(cfg, DictConfig):
             cfg = GPTConfig.from_flattened_cfg(cfg)
