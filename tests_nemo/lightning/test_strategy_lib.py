@@ -1,5 +1,6 @@
 from unittest.mock import ANY, MagicMock, patch
 
+import nemo.collections.nlp     # noqa
 from nemo.lightning import DataConfig, _strategy_lib
 from torch import nn
 
@@ -80,7 +81,7 @@ def test_initialize_data(mock_setup_microbatch_calculator) -> None:
 
 
 @patch('torch.distributed.is_initialized', return_value=True)
-@patch('nemo.lightning._strategy_lib.parallel_state')
+@patch('megatron.core.parallel_state')
 def test_init_model_parallel(mock_mpu, *args):
     from nemo.utils import AppState
     app_state = AppState()
@@ -104,7 +105,7 @@ def test_init_model_parallel(mock_mpu, *args):
 
 
 @patch('nemo.lightning._strategy_lib.DataLoader', return_value=MagicMock())
-@patch('nemo.lightning._strategy_lib.parallel_state')
+@patch('megatron.core.parallel_state')
 def test_process_dataloader(mock_mpu, mock_dataloader) -> None:
     mock_dataloader_instance = MagicMock()
     mock_dataloader_instance.dataset = [1, 2, 3]

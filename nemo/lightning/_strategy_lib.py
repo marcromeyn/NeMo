@@ -161,7 +161,7 @@ def initialize_data(global_rank: int, config: "DataConfig") -> None:
 def init_model_parallel(model: Optional[nn.Module] = None) -> None:
     """Initializes Megatron-LM model parallel if using model parallelism."""
     import torch.distributed
-    from megatron.core import mpu, parallel_state
+    from megatron.core import parallel_state
     from nemo.utils import AppState
 
     app_state = AppState()
@@ -203,7 +203,7 @@ def init_model_parallel(model: Optional[nn.Module] = None) -> None:
                 if index == 0:
                     continue
                 if hasattr(child, "set_tensor_parallel_group"):
-                    tp_group = mpu.get_tensor_model_parallel_group()
+                    tp_group = parallel_state.get_tensor_model_parallel_group()
                     child.set_tensor_parallel_group(tp_group)
 
 
