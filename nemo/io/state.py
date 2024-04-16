@@ -183,7 +183,7 @@ class StateDictTransform(Generic[F]):
             target_keys = list(target_dict.keys())
             
             source_matches = match_keys(source_keys, source_key)
-            if source_matches.size < 1:
+            if source_matches.size == 1 and source_matches == np.array(None):
                 raise ValueError(f"No matches found for source key: {source_key}")
             
             if isinstance(target_key, str):
@@ -194,24 +194,42 @@ class StateDictTransform(Generic[F]):
                 if isinstance(target_key, dict):
                     raise ValueError("Target key must be a string or a tuple of strings.")
                 
-                _matches = np.asarray([match_keys(target_keys, key) for key in target_key])
+                _matches = np.vstack([match_keys(target_keys, key) for key in target_key])
                 target_matches = np.transpose(_matches)
             
             # Determine if we are dealing with multiple source matches or multiple target matches
             multiple_sources = source_matches.ndim >= target_matches.ndim
+            accepts_var_args = any(param.kind == param.VAR_POSITIONAL for param in inspect.signature(self.transform).parameters.values())
             
             if multiple_sources:
                 for target_index, target_match in np.ndenumerate(target_matches):
                     source_match = source_matches[target_index]
-                    if isinstance(source_match, np.ndarray) and source_match.ndim > 0:
-                        for i, sm in enumerate(source_match):
-                            kwargs = {param: source_dict[k] for param, k in zip(fn_params, sm)}
-                            target_dict[target_match] = self.call_transform(ctx, **kwargs)
+                    
+                    if accepts_var_args:
+                        source_values = [source_dict[k] for k in source_match]
+                        target_dict[target_match] = self.call_transform(ctx, *source_values)
                     else:
-                        kwargs = {param: source_dict[k] for param, k in zip(fn_params, [source_match])}
+                        if len(fn_params) != len(source_match):
+                            raise ValueError(f"Mismatch between source and target keys: {source_match} vs {target_match}")
+                        
+                        kwargs = {param: source_dict[k] for param, k in zip(fn_params, list(source_match))}
                         target_dict[target_match] = self.call_transform(ctx, **kwargs)
+                    
+                    
+                    # if isinstance(source_match, np.ndarray) and source_match.ndim > 0:
+                    #     for i, sm in enumerate(source_match):
+                    #         kwargs = {param: source_dict[k] for param, k in zip(fn_params, sm)}
+                    #         target_dict[target_match] = self.call_transform(ctx, **kwargs)
+                    # else:
+                    #     kwargs = {param: source_dict[k] for param, k in zip(fn_params, [source_match])}
+                    #     target_dict[target_match] = self.call_transform(ctx, **kwargs)
             else:
-                for source_index, source_match in np.ndenumerate(source_matches):
+                if source_matches.ndim == 0:
+                    source_matches_list = [source_matches.item()]
+                else:
+                    source_matches_list = list(source_matches)
+                
+                for source_index, source_match in enumerate(source_matches_list):
                     target_match = target_matches[source_index]
                     source_values = [source_dict[source_match]] if np.isscalar(source_match) else [source_dict[k] for k in source_match]
                     kwargs = {param: val for param, val in zip(fn_params, source_values)}
@@ -221,7 +239,7 @@ class StateDictTransform(Generic[F]):
                         target_dict[target_match] = outputs
                     else:
                         for i, t in enumerate(outputs):
-                            target_dict[target_match[i]] = t        
+                            target_dict[target_match[i]] = t
         
         return ctx
     
@@ -229,8 +247,9 @@ class StateDictTransform(Generic[F]):
         func_params = inspect.signature(self.transform).parameters
         expected_num_args = len([p for p in func_params if p not in ['self', 'ctx']])
         provided_num_args = len(args) + len(kwargs)
+        accepts_var_args = any(param.kind == param.VAR_POSITIONAL for param in func_params.values())
 
-        if provided_num_args != expected_num_args:
+        if not accepts_var_args and provided_num_args != expected_num_args:
             raise ValueError(f"Expected {expected_num_args} arguments for the transformation function, but got {provided_num_args}.")
 
         if 'ctx' in func_params:

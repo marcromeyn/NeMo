@@ -66,7 +66,7 @@ class Connector(BasePath, Generic[SourceT, TargetT]):
 class ModelConnector(Connector, Generic[SourceT, TargetT]):
     def nemo_setup(
         self, 
-        model, 
+        model: L.LightningModule, 
         trainer: Optional[L.Trainer] = None
     ) -> L.Trainer:
         from nemo_ext.lightning import MegatronStrategy, Trainer

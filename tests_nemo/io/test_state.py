@@ -127,7 +127,7 @@ class TestStateDictTransform:
             target_key="decoder.layers.*.self_attention.linear_qkv.weight",
             transform=lambda ctx: 0  # Invalid signature
         )
-        with pytest.raises(TypeError):
+        with pytest.raises(ValueError):
             transform(mock_ctx)
             
     def test_transform_with_tuple_target_key_and_multiple_outputs(self, mock_multi_target_ctx):
