@@ -197,8 +197,8 @@ class TestStateTransformDecorator:
         # Apply the transformation
         multiple_outputs_transform(mock_ctx)
         # Verify the target state is updated correctly for each key
-        assert mock_ctx.target_state["decoder.layers.1.self_attention.linear_q.weight"] == 1
-        assert mock_ctx.target_state["decoder.layers.1.self_attention.linear_k.weight"] == 2
+        assert mock_ctx.target_state["decoder.layers.1.self_attention.linear_q.weight"] == 2
+        assert mock_ctx.target_state["decoder.layers.1.self_attention.linear_k.weight"] == 1
         assert mock_ctx.target_state["decoder.layers.1.self_attention.linear_v.weight"] == 3
 
 

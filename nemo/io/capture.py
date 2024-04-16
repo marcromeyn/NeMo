@@ -1,12 +1,8 @@
-import base64
 import functools
 import logging
-import zlib
 from typing import Callable, Generic, Optional, Protocol, TypeVar, runtime_checkable
 
 import fiddle as fdl
-from fiddle._src import config
-from fiddle._src.experimental import serialization
 
 log = logging.getLogger(__name__)
 
@@ -99,26 +95,3 @@ def type_factory(original_type, base_value=None):
             instance = NewType()
         return instance
     return NewType
-
-
-class ZlibJSONSerializer:
-    """Serializer that uses JSON, zlib, and base64 encoding."""
-
-    def serialize(
-        self,
-        cfg: config.Buildable,
-        pyref_policy: Optional[serialization.PyrefPolicy] = None,
-    ) -> str:
-        return base64.urlsafe_b64encode(
-            zlib.compress(serialization.dump_json(cfg, pyref_policy).encode())
-        ).decode("ascii")
-
-    def deserialize(
-        self,
-        serialized: str,
-        pyref_policy: Optional[serialization.PyrefPolicy] = None,
-    ) -> config.Buildable:
-        return serialization.load_json(
-            zlib.decompress(base64.urlsafe_b64decode(serialized)).decode(),
-            pyref_policy=pyref_policy,
-        )

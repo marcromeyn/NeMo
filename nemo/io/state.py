@@ -25,6 +25,58 @@ def apply_transforms(
     mapping: Dict[str, str],
     transforms: Optional[List[Callable[[TransformCTX], TransformCTX]]] = None,
 ) -> TargetModuleT:
+    """
+    Applies a series of transformations to adapt the state dictionary of a source module to 
+    match the structure of a target module's state dictionary.
+
+    This function renames keys according to a provided mapping and modifies values using a list
+    of transformation functions. Each transformation function typically is decorated 
+    with `io.state_transform`.
+
+    Args:
+        source (nn.Module): The source module from which parameters and buffers are taken.
+        target (TargetModuleT): The target module to which parameters and buffers are adapted.
+        mapping (Dict[str, str]): Key-value pairs where each key from the source state dictionary
+            is mapped to a corresponding key in the target state dictionary.
+        transforms (Optional[List[Callable[[TransformCTX], TransformCTX]]]): A list of functions
+            that modify the `TransformCTX` object. If None, no transformations beyond key renaming
+            are applied. Defaults to None.
+
+    Returns:
+        TargetModuleT: The modified target module with its state dictionary adjusted according to
+        the specified mappings and transformations.
+
+    Raises:
+        ValueError: If there's a mismatch in shape between corresponding source and target parameters
+            or buffers.
+        RuntimeError: If the target state dictionary contains keys that are not present in the source
+            state dictionary after all transformations.
+
+    Examples:
+        >>> source_module = nn.Linear(10, 5)
+        >>> target_module = nn.Linear(10, 5)
+        >>> mapping = {'weight': 'weights', 'bias': 'biases'}
+        @io.state_transform(
+            source_key="weight",
+            target_key="weights"
+        )
+        def scale_weights(ctx):
+            ctx.target_state['weights'] = ctx.source_state['weight'] * 2
+            return ctx
+        >>> transformed_target = apply_transforms(
+        ...     source_module, target_module, mapping, [scale_weights]
+        ... )
+        >>> print(transformed_target.state_dict()['weights'])
+
+    See Also:
+        - `TransformCTX`: For more details on the context object used in transformations.
+        - `StateDictTransform`: For creating complex transformations.
+
+    Note:
+        This function is particularly useful when adapting models from different frameworks or
+        when consolidating models with different architectural changes.
+    """
+    
     from megatron.core.transformer.module import MegatronModule
     
     # TODO: How can we improve this?
@@ -59,11 +111,6 @@ def apply_transforms(
             
             _params[name] = nn.Parameter(target_param, requires_grad=param.requires_grad)
             target_state.pop(name)
-                
-            # with torch.no_grad():                
-            #     param.copy_(target_param)
-            #     param.to(device=target_param.device)
-            # target_state.pop(name)
         else:
             print(f"Unexpected key: {name} not in checkpoint but in model.")
             
@@ -167,8 +214,8 @@ class StateDictTransform(Generic[F]):
                 source_key_dict = {param: source_key[i] for i, param in enumerate(fn_params)}
             else:
                 source_key_dict = source_key
-            source_matches_dict = {k: match_keys(list(source_dict.keys()), v) for k, v in source_key_dict.items()}
-            target_matches = match_keys(list(target_dict.keys()), target_key)
+            source_matches_dict = {k: _match_keys(list(source_dict.keys()), v) for k, v in source_key_dict.items()}
+            target_matches = _match_keys(list(target_dict.keys()), target_key)
             
             for target_index, target_match in np.ndenumerate(target_matches):
                 kwargs = {}
@@ -182,19 +229,19 @@ class StateDictTransform(Generic[F]):
             source_keys = list(source_dict.keys())
             target_keys = list(target_dict.keys())
             
-            source_matches = match_keys(source_keys, source_key)
+            source_matches = _match_keys(source_keys, source_key)
             if source_matches.size == 1 and source_matches == np.array(None):
                 raise ValueError(f"No matches found for source key: {source_key}")
             
             if isinstance(target_key, str):
-                target_matches = match_keys(target_keys, target_key)
+                target_matches = _match_keys(target_keys, target_key)
                 if target_matches.size < 1:
                     raise ValueError(f"No matches found for target key: {target_key}")
             else:
                 if isinstance(target_key, dict):
                     raise ValueError("Target key must be a string or a tuple of strings.")
                 
-                _matches = np.vstack([match_keys(target_keys, key) for key in target_key])
+                _matches = np.vstack([_match_keys(target_keys, key) for key in target_key])
                 target_matches = np.transpose(_matches)
             
             # Determine if we are dealing with multiple source matches or multiple target matches
@@ -214,26 +261,26 @@ class StateDictTransform(Generic[F]):
                         
                         kwargs = {param: source_dict[k] for param, k in zip(fn_params, list(source_match))}
                         target_dict[target_match] = self.call_transform(ctx, **kwargs)
-                    
-                    
-                    # if isinstance(source_match, np.ndarray) and source_match.ndim > 0:
-                    #     for i, sm in enumerate(source_match):
-                    #         kwargs = {param: source_dict[k] for param, k in zip(fn_params, sm)}
-                    #         target_dict[target_match] = self.call_transform(ctx, **kwargs)
-                    # else:
-                    #     kwargs = {param: source_dict[k] for param, k in zip(fn_params, [source_match])}
-                    #     target_dict[target_match] = self.call_transform(ctx, **kwargs)
             else:
                 if source_matches.ndim == 0:
                     source_matches_list = [source_matches.item()]
                 else:
                     source_matches_list = list(source_matches)
+                    
+                if source_matches.shape[0] != target_matches.shape[0]:
+                    if target_matches.shape[0] == 1 and source_matches.shape[0] == target_matches.shape[1]:
+                        source_matches_list = [source_matches_list]
+                    else:
+                        raise ValueError("Mismatch between source and target keys: {source_matches} vs {target_matches}")
                 
                 for source_index, source_match in enumerate(source_matches_list):
                     target_match = target_matches[source_index]
                     source_values = [source_dict[source_match]] if np.isscalar(source_match) else [source_dict[k] for k in source_match]
-                    kwargs = {param: val for param, val in zip(fn_params, source_values)}
-                    outputs = self.call_transform(ctx, **kwargs)
+                    if accepts_var_args:
+                        outputs = self.call_transform(ctx, *source_values)
+                    else:
+                        kwargs = {param: val for param, val in zip(fn_params, source_values)}
+                        outputs = self.call_transform(ctx, **kwargs)
                     
                     if isinstance(target_match, str):
                         target_dict[target_match] = outputs
@@ -258,7 +305,7 @@ class StateDictTransform(Generic[F]):
         return self.transform(*args, **kwargs)
             
             
-def match_keys(keys: List[str], pattern: str) -> np.ndarray:
+def _match_keys(keys: List[str], pattern: str) -> np.ndarray:
     regex_pattern = re.compile("^" + pattern.replace("*", "(.*)") + "$")
     wildcard_matches = [[] for _ in range(pattern.count("*"))]
 
