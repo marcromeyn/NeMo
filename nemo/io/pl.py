@@ -206,6 +206,18 @@ def ckpt_to_dir(filepath: Union[str, Path]) -> Path:
 
 
 def is_distributed_ckpt(path) -> bool:
+    """Check if the given path corresponds to a distributed checkpoint directory.
+
+    This function determines if the specified path is a directory that contains a distributed
+    checkpoint by checking the directory's metadata.
+
+    Args:
+        path (Union[str, Path]): The path to check for being a distributed checkpoint.
+
+    Returns:
+        bool: True if the path is a distributed checkpoint directory, False otherwise.
+
+    """
     from megatron.core import dist_checkpointing
         
     checkpoint_dir = ckpt_to_dir(path)
